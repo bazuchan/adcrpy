@@ -1,0 +1,2 @@
+switch channel: T: Code 6, Data b'\x03\x00'
+
