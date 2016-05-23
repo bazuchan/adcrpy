@@ -28,35 +28,24 @@ def dump2packets(data):
         data = data[end:]
     return r
 
-def checklen(x):
-    return struct.unpack('>BBH', x[:4])[2] == len(x)-6
-
-def checkcrc(x):
-    return ADCR_CRC().update(x[:-2]).digest() == struct.unpack('>H', x[-2:])[0]
-
-def checkheadersum(x):
-    return (~(x[0]+x[2]+x[3]))&0xFF == x[1]
-
 def unstuff(x):
-    x = x.replace(b'\xdb\xdc', b'\xc0').replace(b'\xdb\xdd', b'\xdb')
-    if not checklen(x):
+    x = ADCR25.unstuff(x)
+    err = ADCR25.checkpacket(x)
+    if err == -2:
         sys.stderr.write('Check len fail: %d vs %d\n' % (struct.unpack('>BBH', x[:4])[2], len(x)-6))
-    if not checkheadersum(x):
+    elif err == -1:
         sys.stderr.write('Header sum fail\n')
-    if not checkcrc(x):
+    elif err == -3 :
         sys.stderr.write('Check sum fail\n')
     return x
 
 def splitpkt(x):
     return x.strip(b'\xc0').split(b'\xc0\xc0')
 
-def decodepacket(x):
-    return 'Code %u, Data %s' % (x[0], repr(x[4:-2]))
-
 if __name__ == '__main__':
     df = open(sys.argv[1], 'rb').read()
     pkts = dump2packets(df)
     for i in pkts:
         for j in splitpkt(i[1]):
-            print('%s: %s' % (i[0].decode('utf-8'), decodepacket(unstuff(j))))
+            print('%s: %s' % (i[0].decode('utf-8'), ADCR25.decodepacket(unstuff(j))))
 

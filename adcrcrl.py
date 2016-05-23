@@ -66,11 +66,18 @@ class ADCR25(object):
 
     @staticmethod
     def buildpacket(code, payload):
-        r = bytes([code, , len(payload)&])
+        r = bytes([code, (~(code+(len(payload)>>8)+(len(payload)&0xFF)))&0xFF, len(payload)>>8, len(payload)&0xFF])
+        r += bytes(payload)
+        r += bytes(struct.pack('>H', ADCR_CRC().update(r).digest()))
 
+    @staticmethod
+    def decodepacket(x):
+        return 'Code %u, Data %s' % (x[0], repr(x[4:-2]))
 
     def cmd(self, code, payload):
-
+        pkt = self.buildpacket(code, payload)
+        self.sendpacket(pkt)
+        return self.readpacket()
 
 def checkcrc(x):
     return ADCR_CRC().update(x[:-2]).digest() == struct.unpack('>H', x[-2:])[0]
