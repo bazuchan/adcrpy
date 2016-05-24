@@ -63,6 +63,7 @@ class ADCR25(object):
     def __init__(self, device='/dev/ttyUSB0', debug = False):
         self.device = device
         self.debug = debug
+        self.params = None
         self.serial = serial.Serial(self.device, 115200)
 
     @staticmethod
@@ -143,6 +144,21 @@ class ADCR25(object):
                 return 'Set mem ACK'
             else:
                 return 'Set mem chan %u, data %s' % (struct.unpack('H', x[4:6])[0], Channel(x[6:46]))
+        if x[0]==8:
+            if x[2] == 0 and x[3] == 0:
+                return 'Set chan ACK'
+            else:
+                return 'Set chan chan %u, data %s' % (struct.unpack('H', x[4:6])[0], Channel(x[6:46]))
+        if x[0]==6:
+            if x[2] == 0 and x[3] == 0:
+                return 'Select chan ACK'
+            else:
+                return 'Select chan %u, flush %u' % struct.unpack('BB', x[4:6])
+        if x[0]==9:
+            if x[2] == 0 and x[3] == 8 and x[4:12]==b'\x00'*8:
+                return 'Set scan ACK'
+            else:
+                return 'Set scan freq %u, wt %u, mode %u' % struct.unpack('IHBB', x[4:12])[:3]
         if x[0]==1:
             if x[2] == 0 and x[3] > 20:
                 freq, inrx, smode, dbm, uv, pl, encrypted, src, dst = ADCR25.decode_rssi(x[4:])
@@ -154,12 +170,22 @@ class ADCR25(object):
         sys.stderr.write('%sX> %s\n' % (direction, ADCR25.decodepacket(pkt)))
         #sys.stderr.write('%sXR> %s\n' % (direction, repr(pkt)))
 
+    def reset_hw(self):
+        # Erases memory too!!!
+        pkt = self.buildpacket(54, struct.pack('BB', 170, 85))
+        self.sendpacket(pkt)
+
+    def reset_sw(self):
+        # Hangs!!!
+        pkt = self.buildpacket(52, b'')
+        self.sendpacket(pkt)
+
     def cmd(self, code, payload):
         pkt = self.buildpacket(code, payload)
         self.sendpacket(pkt)
         while True:
             r = self.readpacket()
-            if r[0] == code:
+            if r and r[0] == code:
                 return r
 
     def set_freq(self, freq, mode=0):
@@ -218,10 +244,19 @@ class ADCR25(object):
                 uv = round(20.0 * math.log10(float(uvs[0]) / 65536.0))
         return (freq, inrx, smode, dbm, uv, pl, encrypted, src, dst)
 
-    def code4(self):
-        r = self.cmd(4, b'\x00\0')
-        if r[0] == 4:
-            return r[4:]
+    def get_params(self):
+        r = self.cmd(4, b'\x00\x00')
+        if r[0] == 4 and r[2] == 0 and r[3] == 172:
+            self.params = r[4:]
+            return True
+        return False
+
+    def set_params(self):
+        if not self.params:
+            return False
+        r = self.cmd(5, self.params)
+        if r[0] == 5 and r[2] == 0 and r[3] == 0:
+            return True
         return False
 
     def get_info(self):
@@ -235,8 +270,31 @@ class ADCR25(object):
             return (sn, ver, BANDS[band])
         return ('','', 0)
 
-    def scan_set_freq(self, freq, modes):
-        pass
+    def scan_set_freq(self, freq, wt, mode):
+        r = self.cmd(9, struct.pack('IHBB', freq, wt, mode, 0))
+        if r[0] == 9 and r[2] == 0 and r[3] == 8:
+            return True
+        return False
+
+    def scan(self, sfreq, efreq, step, timeout=800, modes=[0]):
+        freqs = {}
+        for freq in range(sfreq, efreq+1, step):
+            for mode in modes:
+                pkt = self.buildpacket(9, struct.pack('IHBB', freq, int(timeout/10), mode, 0))
+                self.sendpacket(pkt)
+                while True:
+                    r = self.readpacket()
+                    if r and r[0] == 1:
+                        rssi = self.decode_rssi(r[4:])
+                        if rssi[1]:
+                            f = (rssi[0], rssi[2])
+                            if f in freqs.keys():
+                                freqs[f] = max(freqs[f], rssi[3])
+                            else:
+                                freqs[f] = rssi[3]
+                    if r and r[0] == 9:
+                        break
+        return freqs
 
 def checkcrc(x):
     return ADCR_CRC().update(x[:-2]).digest() == struct.unpack('>H', x[-2:])[0]
@@ -251,10 +309,18 @@ if __name__ == '__main__':
     (options, args) = parser.parse_args()
 
     adcr = ADCR25(options.device, debug=True)
+    print(adcr.scan(451800000, 452000000, 25000, 2000, [0,1,255]))
+    #adcr.scan_set_freq(451825000, 80, 0)
+    #adcr.scan_set_freq(451825000, 80, 1)
+    #adcr.scan_set_freq(451825000, 80, 4)
+    #adcr.reset_sw()
+    #print(adcr.get_params())
+    #print(adcr.set_params())
+    adcr.select_chan(0)
     print(adcr.get_info())
-    print(adcr.readpacket())
-    print(adcr.readpacket())
-    print(adcr.readpacket())
+    #print(adcr.readpacket())
+    #print(adcr.readpacket())
+    #print(adcr.readpacket())
     #adcr.set_freq(451825000)
     ch = Channel(0, 'test', 0, 1, 0, 451825000)
     #print(adcr.get_mem(1))
