@@ -145,34 +145,8 @@ class ADCR25(object):
                 return 'Set mem chan %u, data %s' % (struct.unpack('H', x[4:6])[0], Channel(x[6:46]))
         if x[0]==1:
             if x[2] == 0 and x[3] > 20:
-                psize = struct.unpack('>H', x[2:4])[0]
-                freq = struct.unpack('I', x[24:28])[0]
-                mode = x[11]
-                smode = ADCR25.MODES[x[11]]
-                inrx = x[4] == 2
-                encrypted = ( x[5] != 128 and mode == 0 ) or ( x[5] !=0 and mode in [5,6] ) or ( x[6]&8 and mode in [1,2,3] )
-                isgroup = ( x[10] != 1 and mode == 0 ) or ( not x[6]&16 and mode in [1,2,3,4] ) or ( x[10]>>5 in [0,1] and mode in [5,6] )
-                if mode == 4:
-                    src, dst = fromcstr(x[28:38]), fromcstr(x[38:48])
-                else:
-                    src, dst = ['%u'%i for i in struct.unpack('II', x[16:24])]
-                dbm = struct.unpack('b', x[7:8])[0]
-                if psize>=44:
-                    pls = struct.unpack('IH', x[48:54])
-                    if pls[0]==0:
-                        pl = 0
-                    else:
-                        pl = math.floor(float(pls[1]) / float(pls[0]) * 100.0)
-                if psize>=50:
-                    uvs = struct.unpack('H', x[54:56])
-                    if uvs[0]==0:
-                        uv = -99
-                    else:
-                        uv = round(20.0 * math.log10(float(uvs[0]) / 65536.0))
-                r = 'RSSI freq %u, %s, signal: %u, pl: %u, uv: %u, rx: %u, encr: %u, src-dst: %s -> %s' % (freq, smode, dbm, pl, uv, inrx, encrypted, src, dst)
                 freq, inrx, smode, dbm, uv, pl, encrypted, src, dst = ADCR25.decode_rssi(x[4:])
-                r += '\nRSSI freq %u, %s, signal: %u, pl: %u, uv: %u, rx: %u, encr: %u, src-dst: %s -> %s' % (freq, smode, dbm, pl, uv, inrx, encrypted, src, dst)
-                return r
+                return 'RSSI freq %u, %s, signal: %u, pl: %u, uv: %u, rx: %u, encr: %u, src-dst: %s -> %s' % (freq, smode, dbm, pl, uv, inrx, encrypted, src, dst)
         return 'Code %u, Data %s' % (x[0], repr(x[4:-2]))
 
     @staticmethod
