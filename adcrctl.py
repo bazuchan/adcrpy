@@ -3,6 +3,9 @@
 import sys
 import serial
 import struct
+import base64
+import math
+import time
 from optparse import OptionParser
 
 class ADCR_CRC(object):
@@ -17,9 +20,49 @@ class ADCR_CRC(object):
     def digest(self):
         return self.crc
 
+def fromcstr(x):
+    if x.find(b'\0')==-1:
+        return x.decode('utf-8')
+    return x[:x.find(b'\0')].decode('utf-8')
+
+class Channel(object):
+    TYPES = {0:'P25', 1:'NXDN', 2:'DMR', 3:'dPMR'}
+    RTYPES = dict(zip(TYPES.values(), TYPES.keys()))
+    def __init__(self, *init):
+        if len(init)==6:
+            self.channo, self.chname, self.chtype, self.chscan, self.chflags, self.chfreq = init
+        elif len(init)==1 and len(init[0]) == 40:
+            self.channo = 0
+            self.chname = fromcstr(init[0][0:16])
+            (self.chtype, self.chscan, self.chflags, self.chfreq) = struct.unpack('BBHI', init[0][16:24])
+        elif len(init)==2 and len(init[1]) == 40:
+            self.channo = init[0]
+            self.chname = fromcstr(init[1][0:16])
+            (self.chtype, self.chscan, self.chflags, self.chfreq) = struct.unpack('BBHI', init[1][16:24])
+        else:
+            self.channo = 0
+            self.chname = u''
+            self.chtype = 0
+            self.chscan = 0
+            self.chflags = 0
+            self.chfreq = 0
+    def tobytes(self, withnum=False):
+        r = b''
+        if withnum:
+            r += bytes(struct.pack('H', self.channo))
+        chname = bytes(self.chname.encode('utf-8'))[:16]
+        r += chname + (16-len(chname))*b'\0'
+        r += bytes(struct.pack('BBHI', self.chtype, self.chscan, self.chflags, self.chfreq))
+        r += b'\0'*16
+        return r
+    def __str__(self):
+        return '%u: %uHz [%s] %s' % (self.channo, self.chfreq, self.TYPES[self.chtype], self.chname)
+
 class ADCR25(object):
-    def __init__(self, device='/dev/ttyUSB0'):
+    MODES = {0:'P25', 1:'DMR', 2:'DMRTS1', 3:'DMRTS2', 4:'YSF', 5:'NXDN48', 6:'NXDN96', 255:'DMR?'}
+    def __init__(self, device='/dev/ttyUSB0', debug = False):
         self.device = device
+        self.debug = debug
         self.serial = serial.Serial(self.device, 115200)
 
     @staticmethod
@@ -31,25 +74,32 @@ class ADCR25(object):
         return x.strip(b'\xc0').replace(b'\xdb\xdc', b'\xc0').replace(b'\xdb\xdd', b'\xdb')
 
     def sendpacket(self, data):
+        if self.debug:
+            self.printpacket(data, 'T')
         self.serial.write(self.stuff(data))
 
     def readpacket(self):
         # attempt to synchronize
-        if self.serial.read(1) != b'0xc0':
-            while self.serial.read(1) != b'0xc0':
+        if self.serial.read(1) != b'\xc0':
+            while self.serial.read(1) != b'\xc0':
                 pass
             return ''
         # read packet
-        pkt = b'0xc0'
+        pkt = b'\xc0'
         while True:
             pkt += self.serial.read(1)
-            if pkt[-1] == b'0xc0':
+            if pkt[-1] == 0xc0:
                 break
             # optimize
-            if len(pkt) == 5 and b'\xdb' not in pkt and (~(pkt[1]+pkt[3]+pkt[4]))&0xFF == pkt[2]:
-                plen = struct.unpack('>BBBH', pkt)[4]
+            if len(pkt) == 5 and 0xdb not in pkt and (~(pkt[1]+pkt[3]+pkt[4]))&0xFF == pkt[2]:
+                plen = struct.unpack('>BBBH', pkt)[3]
                 pkt += self.serial.read(plen + 2)
-        return unstuff(pkt)
+        rpkt = self.unstuff(pkt)
+        if self.debug:
+            self.printpacket(rpkt)
+        if self.checkpacket(rpkt) != 0:
+            return ''
+        return rpkt
 
     E_PKT_INVALID_HEADER = -1
     E_PKT_INVALID_LEN = -2
@@ -58,9 +108,9 @@ class ADCR25(object):
     def checkpacket(x):
         if (~(x[0]+x[2]+x[3]))&0xFF != x[1]:
             return E_PKT_INVALID_HEADER
-        if struct.unpack('>BBH', x[:4])[2] != len(x)-6
+        if struct.unpack('>BBH', x[:4])[2] != len(x)-6:
             return E_PKT_INVALID_LEN
-        if ADCR_CRC().update(x[:-2]).digest() != struct.unpack('>H', x[-2:])[0]
+        if ADCR_CRC().update(x[:-2]).digest() != struct.unpack('>H', x[-2:])[0]:
             return E_PKT_INVALID_CRC
         return 0
 
@@ -69,15 +119,150 @@ class ADCR25(object):
         r = bytes([code, (~(code+(len(payload)>>8)+(len(payload)&0xFF)))&0xFF, len(payload)>>8, len(payload)&0xFF])
         r += bytes(payload)
         r += bytes(struct.pack('>H', ADCR_CRC().update(r).digest()))
+        return r
 
     @staticmethod
     def decodepacket(x):
+        if x[0]==10:
+            if x[2] == 0 and x[3] == 0:
+                return 'Set freq ACK'
+            else:
+                return 'Set freq %u' % struct.unpack('I', x[4:8])[0]
+        if x[0]==0:
+            if x[2] == 0 and x[3] == 0:
+                return 'Get hw info'
+            else:
+                return 'Get hw info, fw ver: %s, s/n: %s' % ('%u.%u' % struct.unpack('BB', x[12:14]), base64.b16encode(x[4:12]))
+        if x[0]==2:
+            if x[2] == 0 and x[3] == 2:
+                return 'Get mem, chan %u' % struct.unpack('H', x[4:6])
+            else:
+                return 'Get mem resp: %s' % Channel(x[4:44])
+        if x[0]==3:
+            if x[2] == 0 and x[3] == 0:
+                return 'Set mem ACK'
+            else:
+                return 'Set mem chan %u, data %s' % (struct.unpack('H', x[4:6])[0], Channel(x[6:46]))
+        if x[0]==1:
+            if x[2] == 0 and x[3] > 20:
+                psize = struct.unpack('>H', x[2:4])[0]
+                freq = struct.unpack('I', x[24:28])[0]
+                mode = x[11]
+                smode = ADCR25.MODES[x[11]]
+                inrx = x[4] == 2
+                encrypted = ( x[5] != 128 and mode == 0 ) or ( x[5] !=0 and mode in [5,6] ) or ( x[6]&8 and mode in [1,2,3] )
+                isgroup = ( x[10] != 1 and mode == 0 ) or ( not x[6]&16 and mode in [1,2,3,4] ) or ( x[10]>>5 in [0,1] and mode in [5,6] )
+                if mode == 4:
+                    src, dst = fromcstr(x[28:38]), fromcstr(x[38:48])
+                else:
+                    src, dst = ['%u'%i for i in struct.unpack('II', x[16:24])]
+                dbm = struct.unpack('b', x[7:8])[0]
+                if psize>=44:
+                    pls = struct.unpack('IH', x[48:54])
+                    if pls[0]==0:
+                        pl = 0
+                    else:
+                        pl = math.floor(float(pls[1]) / float(pls[0]) * 100.0)
+                if psize>=50:
+                    uvs = struct.unpack('H', x[54:56])
+                    if uvs[0]==0:
+                        uv = -99
+                    else:
+                        uv = round(20.0 * math.log10(float(uvs[0]) / 65536.0))
+                r = 'RSSI freq %u, %s, signal: %u, pl: %u, uv: %u, rx: %u, encr: %u, src-dst: %s -> %s' % (freq, smode, dbm, pl, uv, inrx, encrypted, src, dst)
+                freq, inrx, smode, dbm, uv, pl, encrypted, src, dst = ADCR25.decode_rssi(x[4:])
+                r += '\nRSSI freq %u, %s, signal: %u, pl: %u, uv: %u, rx: %u, encr: %u, src-dst: %s -> %s' % (freq, smode, dbm, pl, uv, inrx, encrypted, src, dst)
+                return r
         return 'Code %u, Data %s' % (x[0], repr(x[4:-2]))
+
+    @staticmethod
+    def printpacket(pkt, direction='R'):
+        sys.stderr.write('%sX> %s\n' % (direction, ADCR25.decodepacket(pkt)))
+        #sys.stderr.write('%sXR> %s\n' % (direction, repr(pkt)))
 
     def cmd(self, code, payload):
         pkt = self.buildpacket(code, payload)
         self.sendpacket(pkt)
-        return self.readpacket()
+        while True:
+            r = self.readpacket()
+            if r[0] == code:
+                return r
+
+    def set_freq(self, freq, mode=0):
+        r = self.cmd(10, struct.pack('IBB', freq, mode, 0))
+        if r[0] == 10 and r[2] == 0 and r[3] == 0:
+            return True
+        return False
+
+    def get_mem(self, channo):
+        r = self.cmd(2, struct.pack('H', channo))
+        if r[0] == 2 and r[2] == 0 and r[3] == 40:
+            chan = Channel(channo, r[4:44])
+            return chan
+        return None
+
+    def set_mem(self, chan):
+        r = self.cmd(3, chan.tobytes(withnum=True))
+        if r[0] == 3 and r[2] == 0 and r[3] == 0:
+            return True
+        return False
+
+    def set_chan(self, chan):
+        r = self.cmd(8, chan.tobytes(withnum=True))
+        if r[0] == 8 and r[2] == 0 and r[3] == 0:
+            return True
+        return False
+
+    def select_chan(self, channo, flush=0):
+        r = self.cmd(6, struct.pack('BB', channo, flush))
+        if r[0] == 6 and r[2] == 0 and r[3] == 0:
+            return True
+        return False
+
+    @staticmethod
+    def decode_rssi(pkt):
+        inrx = pkt[0] == 2
+        mode = pkt[7]
+        encrypted = ( mode == 0 and pkt[1] != 128 ) or ( mode in [1,2,3] and pkt[2]&8 ) or ( mode in [5,6] and pkt[1] !=0 )
+        isgroup = ( mode == 0 and pkt[6] != 1 ) or ( mode in [1,2,3,4] and not pkt[2]&16 ) or ( mode in [5,6] and pkt[6]>>5 in [0,1] )
+        dbm = struct.unpack('b', pkt[3:4])[0]
+        smode = ADCR25.MODES[mode]
+        freq = struct.unpack('I', pkt[20:24])[0]
+        if mode == 4:
+            src, dst = fromcstr(pkt[24:34]), fromcstr(pkt[34:44])
+        else:
+            src, dst = ['%u'%i for i in struct.unpack('II', pkt[12:20])]
+        pl = 0
+        if len(pkt)>=44:
+            pls = struct.unpack('IH', pkt[44:50])
+            if pls[0]!=0:
+                pl = math.floor(float(pls[1]) / float(pls[0]) * 100.0)
+        uv = -99
+        if len(pkt)>=50:
+            uvs = struct.unpack('H', pkt[50:52])
+            if uvs[0]!=0:
+                uv = round(20.0 * math.log10(float(uvs[0]) / 65536.0))
+        return (freq, inrx, smode, dbm, uv, pl, encrypted, src, dst)
+
+    def code4(self):
+        r = self.cmd(4, b'\x00\0')
+        if r[0] == 4:
+            return r[4:]
+        return False
+
+    def get_info(self):
+        BANDS = {1:'UHF', 4:'VHF', 5:'800MHz'}
+        time.sleep(1)
+        r = self.cmd(0, b'')
+        if r[0] == 0 and r[2] == 0 and r[3] == 12:
+            sn = base64.b16encode(r[4:12])
+            ver = '%u.%u' % struct.unpack('BB', r[12:14])
+            band = struct.unpack('H', r[14:16])[0]
+            return (sn, ver, BANDS[band])
+        return ('','', 0)
+
+    def scan_set_freq(self, freq, modes):
+        pass
 
 def checkcrc(x):
     return ADCR_CRC().update(x[:-2]).digest() == struct.unpack('>H', x[-2:])[0]
@@ -90,6 +275,25 @@ if __name__ == '__main__':
     parser = OptionParser(usage=usage)
     parser.add_option('-d', '--device', dest='device', help='Serial port device', default='/dev/ttyUSB0')
     (options, args) = parser.parse_args()
-    
-    adcr = ADCR25(options.device)
+
+    adcr = ADCR25(options.device, debug=True)
+    print(adcr.get_info())
+    print(adcr.readpacket())
+    print(adcr.readpacket())
+    print(adcr.readpacket())
+    #adcr.set_freq(451825000)
+    ch = Channel(0, 'test', 0, 1, 0, 451825000)
+    #print(adcr.get_mem(1))
+    #q = adcr.code4()
+    #print(struct.unpack('H', q[:2]))
+    #print(struct.unpack('I', q[12:16]))
+    #print(struct.unpack('I', q[16:20]))
+    #print(struct.unpack('I', q[20:24]))
+    #print(struct.unpack('I', q[24:28]))
+    #print(struct.unpack('I', q[28:32]))
+    #print(struct.unpack('BB', q[0][8:10]))
+    #adcr.set_mem(ch)
+    #for i in range(0, 50):
+    #    print(adcr.get_mem(i))
+    #r = adcr.cmd(0, b'')
 
