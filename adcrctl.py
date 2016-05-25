@@ -6,6 +6,7 @@ import struct
 import base64
 import math
 import time
+import csv
 from optparse import OptionParser
 
 class ADCR_CRC(object):
@@ -161,8 +162,8 @@ class ADCR25(object):
                 return 'Set scan freq %u, wt %u, mode %u' % struct.unpack('IHBB', x[4:12])[:3]
         if x[0]==1:
             if x[2] == 0 and x[3] > 20:
-                freq, inrx, smode, dbm, uv, pl, encrypted, src, dst = ADCR25.decode_rssi(x[4:])
-                return 'RSSI freq %u, %s, signal: %u, pl: %u, uv: %u, rx: %u, encr: %u, src-dst: %s -> %s' % (freq, smode, dbm, pl, uv, inrx, encrypted, src, dst)
+                rssi = ADCR25.decode_rssi(x[4:])
+                return 'RSSI ' + ', '.join(['%s: %s' % (i, rssi[i]) for i in ['inrx', 'freq', 'smode', 'dbm', 'uv', 'pl', 'encrypted', 'isgroup', 'src', 'dst']])
         return 'Code %u, Data %s' % (x[0], repr(x[4:-2]))
 
     @staticmethod
@@ -221,28 +222,29 @@ class ADCR25(object):
 
     @staticmethod
     def decode_rssi(pkt):
-        inrx = pkt[0] == 2
-        mode = pkt[7]
-        encrypted = ( mode == 0 and pkt[1] != 128 ) or ( mode in [1,2,3] and pkt[2]&8 ) or ( mode in [5,6] and pkt[1] !=0 )
-        isgroup = ( mode == 0 and pkt[6] != 1 ) or ( mode in [1,2,3,4] and not pkt[2]&16 ) or ( mode in [5,6] and pkt[6]>>5 in [0,1] )
-        dbm = struct.unpack('b', pkt[3:4])[0]
-        smode = ADCR25.MODES[mode]
-        freq = struct.unpack('I', pkt[20:24])[0]
-        if mode == 4:
-            src, dst = fromcstr(pkt[24:34]), fromcstr(pkt[34:44])
+        r = {}
+        r['inrx'] = pkt[0] == 2
+        r['mode'] = pkt[7]
+        r['encrypted'] = ( r['mode'] == 0 and pkt[1] != 128 ) or ( r['mode'] in [1,2,3] and pkt[2]&8 ) or ( r['mode'] in [5,6] and pkt[1] !=0 )
+        r['isgroup'] = ( r['mode'] == 0 and pkt[6] != 1 ) or ( r['mode'] in [1,2,3,4] and not pkt[2]&16 ) or ( r['mode'] in [5,6] and pkt[6]>>5 in [0,1] )
+        r['dbm'] = struct.unpack('b', pkt[3:4])[0]
+        r['smode'] = ADCR25.MODES[r['mode']]
+        r['freq'] = struct.unpack('I', pkt[20:24])[0]
+        if r['mode'] == 4:
+            r['src'], r['dst'] = fromcstr(pkt[24:34]), fromcstr(pkt[34:44])
         else:
-            src, dst = ['%u'%i for i in struct.unpack('II', pkt[12:20])]
-        pl = 0
+            r['src'], r['dst'] = ['%u'%i for i in struct.unpack('II', pkt[12:20])]
+        r['pl'] = 0
         if len(pkt)>=44:
             pls = struct.unpack('IH', pkt[44:50])
             if pls[0]!=0:
-                pl = math.floor(float(pls[1]) / float(pls[0]) * 100.0)
-        uv = -99
+                r['pl'] = math.floor(float(pls[1]) / float(pls[0]) * 100.0)
+        r['uv'] = -99
         if len(pkt)>=50:
             uvs = struct.unpack('H', pkt[50:52])
             if uvs[0]!=0:
-                uv = round(20.0 * math.log10(float(uvs[0]) / 65536.0))
-        return (freq, inrx, smode, dbm, uv, pl, encrypted, src, dst)
+                r['uv'] = round(20.0 * math.log10(float(uvs[0]) / 65536.0))
+        return r
 
     def get_params(self):
         r = self.cmd(4, b'\x00\x00')
@@ -286,12 +288,12 @@ class ADCR25(object):
                     r = self.readpacket()
                     if r and r[0] == 1:
                         rssi = self.decode_rssi(r[4:])
-                        if rssi[1]:
-                            f = (rssi[0], rssi[2])
+                        if rssi['inrx']:
+                            f = (rssi['freq'], rssi['smode'])
                             if f in freqs.keys():
-                                freqs[f] = max(freqs[f], rssi[3])
+                                freqs[f] = max(freqs[f], rssi['dbm'])
                             else:
-                                freqs[f] = rssi[3]
+                                freqs[f] = rssi['dbm']
                     if r and r[0] == 9:
                         break
         return freqs
