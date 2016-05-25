@@ -58,6 +58,9 @@ class Channel(object):
         return r
     def __str__(self):
         return '%u: %uHz [%s] %s' % (self.channo, self.chfreq, self.TYPES[self.chtype], self.chname)
+    def tocsvline(self):
+        return [self.channo, self.chname, self.chtype, self.chscan, self.chflags, self.chfreq]
+    csvheader = ['CH Num', 'CH Name', 'Type', 'Scan', 'Flags', 'Frequency']
 
 class ADCR25(object):
     MODES = {0:'P25', 1:'DMR', 2:'DMRTS1', 3:'DMRTS2', 4:'YSF', 5:'NXDN48', 6:'NXDN96', 255:'DMR?'}
@@ -297,6 +300,40 @@ class ADCR25(object):
                     if r and r[0] == 9:
                         break
         return freqs
+    
+    def write_csv(self, fname, channels):
+        with open(fname, 'w', newline='') as csvfile:
+            writer = csv.writer(csvfile, delimiter=';', quotechar='"', quoting=csv.QUOTE_NONNUMERIC)
+            writer.writerow(Channel.csvheader)
+            for chan in channels:
+                writer.writerow(chan.tocsvline())
+
+    def read_csv(self, fname, ignorenums=False):
+        channels = {}
+        with open(fname, newline='') as csvfile:
+            reader = csv.reader(csvfile, delimiter=';', quotechar='"')
+            if reader.__next__() != Channel.csvheader:
+                return {}
+            for row in reader:
+                chan = Channel(int(row[0]), row[1], int(row[2]), int(row[3]), int(row[4]), int(row[5]))
+                print(chan)
+                if ignorenums:
+                    chan.channo = len(channels)
+                channels[chan.channo] = chan
+        return channels
+
+    def mem2csv(self, fname):
+        channels = []
+        for chno in range(0, 50):
+            channels.append(self.get_mem(chno))
+        self.write_csv(fname, channels)
+
+    def csv2mem(self, fname, ignorenums=False):
+        channels = self.read_csv(fname, ignorenums)
+        if not channels:
+            return
+        for chno in channels.keys():
+            self.set_mem(channels[chno])
 
 def checkcrc(x):
     return ADCR_CRC().update(x[:-2]).digest() == struct.unpack('>H', x[-2:])[0]
@@ -308,10 +345,12 @@ if __name__ == '__main__':
     usage = 'usage: %prog [options] <cmd> [params] ...'
     parser = OptionParser(usage=usage)
     parser.add_option('-d', '--device', dest='device', help='Serial port device', default='/dev/ttyUSB0')
+    parser.add_option('-f', '--csv-file', dest='csv', help='CSV file')
+    parser.add_option("-i", "--ignore-channel-numbers", dest="ignorechno", action="store_true", help="Ignore channel numbers from CSV file", default=False)
     (options, args) = parser.parse_args()
 
     adcr = ADCR25(options.device, debug=True)
-    print(adcr.scan(451800000, 452000000, 25000, 2000, [0,1,255]))
+    #print(adcr.scan(451800000, 452000000, 25000, 2000, [0,1,255]))
     #adcr.scan_set_freq(451825000, 80, 0)
     #adcr.scan_set_freq(451825000, 80, 1)
     #adcr.scan_set_freq(451825000, 80, 4)
@@ -338,4 +377,6 @@ if __name__ == '__main__':
     #for i in range(0, 50):
     #    print(adcr.get_mem(i))
     #r = adcr.cmd(0, b'')
+    adcr.mem2csv('adcrmem.csv')
+    #adcr.csv2mem('adcrmem.csv')
 
