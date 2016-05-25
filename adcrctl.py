@@ -284,33 +284,36 @@ class ADCR25(object):
 
     def scan(self, sfreq, efreq, step, timeout=800, modes=[0], cycles=1, printprogress=False):
         freqs = {}
-        for cycle in range(0, cycles):
-            for freq in range(sfreq, efreq+1, step):
-                if printprogress:
-                    sys.stderr.write('Scanning frequency %u ... '%freq)
-                    sys.stderr.flush()
-                for mode in modes:
-                    pkt = self.buildpacket(9, struct.pack('IHBB', freq, int(timeout/10), mode, 0))
-                    self.sendpacket(pkt)
-                    while True:
-                        r = self.readpacket()
-                        if r and r[0] == 1:
-                            rssi = self.decode_rssi(r[4:])
-                            if rssi['inrx']:
-                                rf, rm = rssi['freq'], rssi['mode']
-                                if rf in freqs.keys() and rm in freqs[rf].keys():
-                                    freqs[rf][rm] = max(freqs[rf][rm], rssi['dbm'])
-                                elif rf in freqs.keys():
-                                    freqs[rf][rm] = rssi['dbm']
-                                else:
-                                    freqs[rf] = {rm:rssi['dbm']}
-                        if r and r[0] == 9:
-                            break
-                if printprogress:
-                    if freq in freqs.keys():
-                        sys.stderr.write('found ' + ', '.join(['%s: %d dbm'%(self.MODES[i], freqs[freq][i]) for i in freqs[freq].keys()])+'\n')
-                    else:
-                        sys.stderr.write('\n')
+        try:
+            for cycle in range(0, cycles):
+                for freq in range(sfreq, efreq+1, step):
+                    if printprogress:
+                        sys.stderr.write('Scanning frequency %u ... '%freq)
+                        sys.stderr.flush()
+                    for mode in modes:
+                        pkt = self.buildpacket(9, struct.pack('IHBB', freq, int(timeout/10), mode, 0))
+                        self.sendpacket(pkt)
+                        while True:
+                            r = self.readpacket()
+                            if r and r[0] == 1:
+                                rssi = self.decode_rssi(r[4:])
+                                if rssi['inrx']:
+                                    rf, rm = rssi['freq'], rssi['mode']
+                                    if rf in freqs.keys() and rm in freqs[rf].keys():
+                                        freqs[rf][rm] = max(freqs[rf][rm], rssi['dbm'])
+                                    elif rf in freqs.keys():
+                                        freqs[rf][rm] = rssi['dbm']
+                                    else:
+                                        freqs[rf] = {rm:rssi['dbm']}
+                            if r and r[0] == 9:
+                                break
+                    if printprogress:
+                        if freq in freqs.keys():
+                            sys.stderr.write('found ' + ', '.join(['%s: %d dbm'%(self.MODES[i], freqs[freq][i]) for i in freqs[freq].keys()])+'\n')
+                        else:
+                            sys.stderr.write('\n')
+        except KeyboardInterrupt:
+            sys.stderr.write('\n')
         return freqs
     
     def write_csv(self, fname, channels):
