@@ -7,7 +7,7 @@ import base64
 import math
 import time
 import csv
-from optparse import OptionParser
+import argparse
 
 class ADCR_CRC(object):
     TABLE = [ 0x0000, 0x1081, 0x2102, 0x3183, 0x4204, 0x5285, 0x6306, 0x7387, 0x8408, 0x9489, 0xa50a, 0xb58b, 0xc60c, 0xd68d, 0xe70e, 0xf78f]
@@ -27,8 +27,6 @@ def fromcstr(x):
     return x[:x.find(b'\0')].decode('utf-8')
 
 class Channel(object):
-    TYPES = {0:'P25', 1:'NXDN', 2:'DMR', 3:'dPMR'}
-    RTYPES = dict(zip(TYPES.values(), TYPES.keys()))
     def __init__(self, *init):
         if len(init)==6:
             self.channo, self.chname, self.chtype, self.chscan, self.chflags, self.chfreq = init
@@ -41,7 +39,7 @@ class Channel(object):
             self.chname = fromcstr(init[1][0:16])
             (self.chtype, self.chscan, self.chflags, self.chfreq) = struct.unpack('BBHI', init[1][16:24])
         else:
-            self.channo = 0
+            self.channo = -1
             self.chname = u''
             self.chtype = 0
             self.chscan = 0
@@ -57,13 +55,14 @@ class Channel(object):
         r += b'\0'*16
         return r
     def __str__(self):
-        return '%u: %uHz [%s] %s' % (self.channo, self.chfreq, self.TYPES[self.chtype], self.chname)
+        return '%u: %uHz [%s] %s' % (self.channo, self.chfreq, ADCR25.MODES[self.chtype], self.chname)
     def tocsvline(self):
         return [self.channo, self.chname, self.chtype, self.chscan, self.chflags, self.chfreq]
     csvheader = ['CH Num', 'CH Name', 'Type', 'Scan', 'Flags', 'Frequency']
 
 class ADCR25(object):
     MODES = {0:'P25', 1:'DMR', 2:'DMRTS1', 3:'DMRTS2', 4:'YSF', 5:'NXDN48', 6:'NXDN96', 255:'DMR?'}
+    RMODES = dict(zip(MODES.values(), MODES.keys()))
     def __init__(self, device='/dev/ttyUSB0', debug = False):
         self.device = device
         self.debug = debug
@@ -228,6 +227,8 @@ class ADCR25(object):
         r = {}
         r['inrx'] = pkt[0] == 2
         r['mode'] = pkt[7]
+        if r['mode'] == 255:
+            r['mode'] = 1
         r['encrypted'] = ( r['mode'] == 0 and pkt[1] != 128 ) or ( r['mode'] in [1,2,3] and pkt[2]&8 ) or ( r['mode'] in [5,6] and pkt[1] !=0 )
         r['isgroup'] = ( r['mode'] == 0 and pkt[6] != 1 ) or ( r['mode'] in [1,2,3,4] and not pkt[2]&16 ) or ( r['mode'] in [5,6] and pkt[6]>>5 in [0,1] )
         r['dbm'] = struct.unpack('b', pkt[3:4])[0]
@@ -281,24 +282,35 @@ class ADCR25(object):
             return True
         return False
 
-    def scan(self, sfreq, efreq, step, timeout=800, modes=[0]):
+    def scan(self, sfreq, efreq, step, timeout=800, modes=[0], cycles=1, printprogress=False):
         freqs = {}
-        for freq in range(sfreq, efreq+1, step):
-            for mode in modes:
-                pkt = self.buildpacket(9, struct.pack('IHBB', freq, int(timeout/10), mode, 0))
-                self.sendpacket(pkt)
-                while True:
-                    r = self.readpacket()
-                    if r and r[0] == 1:
-                        rssi = self.decode_rssi(r[4:])
-                        if rssi['inrx']:
-                            f = (rssi['freq'], rssi['smode'])
-                            if f in freqs.keys():
-                                freqs[f] = max(freqs[f], rssi['dbm'])
-                            else:
-                                freqs[f] = rssi['dbm']
-                    if r and r[0] == 9:
-                        break
+        for cycle in range(0, cycles):
+            for freq in range(sfreq, efreq+1, step):
+                if printprogress:
+                    sys.stderr.write('Scanning frequency %u ... '%freq)
+                    sys.stderr.flush()
+                for mode in modes:
+                    pkt = self.buildpacket(9, struct.pack('IHBB', freq, int(timeout/10), mode, 0))
+                    self.sendpacket(pkt)
+                    while True:
+                        r = self.readpacket()
+                        if r and r[0] == 1:
+                            rssi = self.decode_rssi(r[4:])
+                            if rssi['inrx']:
+                                rf, rm = rssi['freq'], rssi['mode']
+                                if rf in freqs.keys() and rm in freqs[rf].keys():
+                                    freqs[rf][rm] = max(freqs[rf][rm], rssi['dbm'])
+                                elif rf in freqs.keys():
+                                    freqs[rf][rm] = rssi['dbm']
+                                else:
+                                    freqs[rf] = {rm:rssi['dbm']}
+                        if r and r[0] == 9:
+                            break
+                if printprogress:
+                    if freq in freqs.keys():
+                        sys.stderr.write('found ' + ', '.join(['%s: %d dbm'%(self.MODES[i], freqs[freq][i]) for i in freqs[freq].keys()])+'\n')
+                    else:
+                        sys.stderr.write('\n')
         return freqs
     
     def write_csv(self, fname, channels):
@@ -316,7 +328,8 @@ class ADCR25(object):
                 return {}
             for row in reader:
                 chan = Channel(int(row[0]), row[1], int(row[2]), int(row[3]), int(row[4]), int(row[5]))
-                print(chan)
+                if chan.channo == -1:
+                    continue
                 if ignorenums:
                     chan.channo = len(channels)
                 channels[chan.channo] = chan
@@ -341,15 +354,67 @@ def checkcrc(x):
 def checkheadersum(x):
     return (~(x[0]+x[2]+x[3]))&0xFF == x[1]
 
-if __name__ == '__main__':
-    usage = 'usage: %prog [options] <cmd> [params] ...'
-    parser = OptionParser(usage=usage)
-    parser.add_option('-d', '--device', dest='device', help='Serial port device', default='/dev/ttyUSB0')
-    parser.add_option('-f', '--csv-file', dest='csv', help='CSV file')
-    parser.add_option("-i", "--ignore-channel-numbers", dest="ignorechno", action="store_true", help="Ignore channel numbers from CSV file", default=False)
-    (options, args) = parser.parse_args()
+class MyHelpFormatter(argparse.HelpFormatter):
+    def __init__(self, *kc, **kv):
+        kv['width'] = 1000
+        kv['max_help_position'] = 1000
+        super(MyHelpFormatter, self).__init__(*kc, **kv)
 
-    adcr = ADCR25(options.device, debug=True)
+if __name__ == '__main__':
+    commands = ['scan']
+
+    usage = '%(prog)s [-d device] <command> [command options] ...'
+    p = argparse.ArgumentParser(usage=usage, formatter_class=MyHelpFormatter, add_help=False)
+    p.add_argument('command', help='One of: scan, chan', nargs='?')
+    p.add_argument('-d', '--device', help='Serial port device', default='/dev/ttyUSB0')
+    p.add_argument('-h', '--help', dest='cmd', help='Show help for specified command', nargs='?', default=argparse.SUPPRESS)
+    args = p.parse_args([i for i in sys.argv if i in ['-d', '--device', '-h', '--help']+commands])
+    if not args.command and not ( args.__contains__('cmd') and args.cmd ):
+        p.print_help()
+        sys.exit(0)
+
+    if args.command == 'scan' or ( args.__contains__('cmd') and args.cmd == 'scan' ):
+        usage = '%(prog)s [-d device] scan [scan options] <start freq MHz> <end freq MHz>'
+        parser = argparse.ArgumentParser(usage=usage, formatter_class=MyHelpFormatter)
+        parser.add_argument('command', help='scan')
+        parser.add_argument('start', help='Start frequency in MHz', type=float)
+        parser.add_argument('end', help='End frequency in MHz', type=float)
+        parser.add_argument('-d', '--device', help='Serial port device', default='/dev/ttyUSB0')
+        parser.add_argument('-t', '--step', help='Scan step in KHz [default: %(default)s]', type=float, default=12.5)
+        parser.add_argument('-w', '--wait', help='Time to spend on each frequency and mode [default: %(default)s]', type=int, default=800)
+        parser.add_argument('-c', '--cycles', help='Number of times loop through frequencies [default: %(default)s]', type=int, default=1)
+        parser.add_argument('-m', '--modes', help='Comma separated list of communication modes to scan [default: %(default)s]', default='P25,DMR,YSF,NXDN')
+        parser.add_argument('-f', '--csv-file', dest='csvfile', help='Also write results to CSV file <file>')
+        args = parser.parse_args()
+       
+        modes = []
+        for mode in args.modes.split(','):
+            modes.extend({'P25':[0], 'DMR':[1,255], 'YSF':[4], 'NXDN':[5,6]}[mode])
+        adcr = ADCR25(args.device)
+        res = adcr.scan(int(args.start*10**6), int(args.end*10**6), int(args.step*10**3), timeout=args.wait, modes=modes, cycles=args.cycles, printprogress=True)
+        print('Found:')
+        channels = []
+        for freq in res.keys():
+            for mode in res[freq].keys():
+                print('%u %s %d dbm' % (freq, ADCR25.MODES[mode], res[freq][mode]))
+                if args.csvfile:
+                    channels.append(Channel(len(channels), '%u %s' % (freq,ADCR25.MODES[mode]), mode, 1, 0, freq))
+        if args.csvfile:
+            print('Saving scan results to %s'%args.csvfile)
+            adcr.write_csv(args.csvfile, channels)
+        sys.exit(0)
+
+    #parser.add_argument("-i", "--ignore-channel-numbers", dest='ignorechno', action="store_true", help="Ignore channel numbers from CSV file", default=False)
+    #parser.add_argument('cmd')
+    print(1)
+    print(2)
+
+    if args.command == 'scan':
+        print(dir(args))
+
+    #if not options.cmd:
+
+
     #print(adcr.scan(451800000, 452000000, 25000, 2000, [0,1,255]))
     #adcr.scan_set_freq(451825000, 80, 0)
     #adcr.scan_set_freq(451825000, 80, 1)
@@ -377,6 +442,6 @@ if __name__ == '__main__':
     #for i in range(0, 50):
     #    print(adcr.get_mem(i))
     #r = adcr.cmd(0, b'')
-    adcr.mem2csv('adcrmem.csv')
+    #adcr.mem2csv('adcrmem.csv')
     #adcr.csv2mem('adcrmem.csv')
 
