@@ -61,7 +61,7 @@ class Channel(object):
     csvheader = ['CH Num', 'CH Name', 'Type', 'Scan', 'Flags', 'Frequency']
 
 class ADCR25(object):
-    MODES = {0:'P25', 1:'DMR', 2:'DMRTS1', 3:'DMRTS2', 4:'YSF', 5:'NXDN48', 6:'NXDN96', 255:'DMR?'}
+    MODES = {0:'P25', 1:'DMR', 2:'DMRTS1', 3:'DMRTS2', 4:'YSF', 5:'NXDN48', 6:'NXDN96'}
     RMODES = dict(zip(MODES.values(), MODES.keys()))
     def __init__(self, device='/dev/ttyUSB0', debug = False):
         self.device = device
@@ -361,11 +361,11 @@ class MyHelpFormatter(argparse.HelpFormatter):
         super(MyHelpFormatter, self).__init__(*kc, **kv)
 
 if __name__ == '__main__':
-    commands = ['scan']
+    commands = ['scan', 'tune', 'channel']
 
     usage = '%(prog)s [-d device] <command> [command options] ...'
     p = argparse.ArgumentParser(usage=usage, formatter_class=MyHelpFormatter, add_help=False)
-    p.add_argument('command', help='One of: scan, chan', nargs='?')
+    p.add_argument('command', help='One of: ' + ', '.join(commands), nargs='?')
     p.add_argument('-d', '--device', help='Serial port device', default='/dev/ttyUSB0')
     p.add_argument('-h', '--help', dest='cmd', help='Show help for specified command', nargs='?', default=argparse.SUPPRESS)
     args = p.parse_args([i for i in sys.argv if i in ['-d', '--device', '-h', '--help']+commands])
@@ -404,44 +404,17 @@ if __name__ == '__main__':
             adcr.write_csv(args.csvfile, channels)
         sys.exit(0)
 
-    #parser.add_argument("-i", "--ignore-channel-numbers", dest='ignorechno', action="store_true", help="Ignore channel numbers from CSV file", default=False)
-    #parser.add_argument('cmd')
-    print(1)
-    print(2)
-
-    if args.command == 'scan':
-        print(dir(args))
-
-    #if not options.cmd:
-
-
-    #print(adcr.scan(451800000, 452000000, 25000, 2000, [0,1,255]))
-    #adcr.scan_set_freq(451825000, 80, 0)
-    #adcr.scan_set_freq(451825000, 80, 1)
-    #adcr.scan_set_freq(451825000, 80, 4)
-    #adcr.reset_sw()
-    #print(adcr.get_params())
-    #print(adcr.set_params())
-    adcr.select_chan(0)
-    print(adcr.get_info())
-    #print(adcr.readpacket())
-    #print(adcr.readpacket())
-    #print(adcr.readpacket())
-    #adcr.set_freq(451825000)
-    ch = Channel(0, 'test', 0, 1, 0, 451825000)
-    #print(adcr.get_mem(1))
-    #q = adcr.code4()
-    #print(struct.unpack('H', q[:2]))
-    #print(struct.unpack('I', q[12:16]))
-    #print(struct.unpack('I', q[16:20]))
-    #print(struct.unpack('I', q[20:24]))
-    #print(struct.unpack('I', q[24:28]))
-    #print(struct.unpack('I', q[28:32]))
-    #print(struct.unpack('BB', q[0][8:10]))
-    #adcr.set_mem(ch)
-    #for i in range(0, 50):
-    #    print(adcr.get_mem(i))
-    #r = adcr.cmd(0, b'')
-    #adcr.mem2csv('adcrmem.csv')
-    #adcr.csv2mem('adcrmem.csv')
+    if args.command == 'tune' or ( args.__contains__('cmd') and args.cmd == 'tune' ):
+        usage = '%(prog)s [-d device] tune <freq MHz> <mode>'
+        parser = argparse.ArgumentParser(usage=usage, formatter_class=MyHelpFormatter)
+        parser.add_argument('command', help='tune')
+        parser.add_argument('freq', help='frequency in MHz', type=float)
+        parser.add_argument('mode', help='communication mode [default: %(default)s]', nargs='?', default='P25', choices=ADCR25.RMODES.keys())
+        parser.add_argument('-d', '--device', help='Serial port device', default='/dev/ttyUSB0')
+        args = parser.parse_args()
+       
+        adcr = ADCR25(args.device)
+        adcr.set_freq(int(args.freq*10**6), ADCR25.RMODES[args.mode])
+        print('Tuned to %3.fMhz, %s' % (args.freq, args.mode))
+        sys.exit(0)
 
