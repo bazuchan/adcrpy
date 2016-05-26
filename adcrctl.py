@@ -86,6 +86,7 @@ class ADCR25(object):
         self.device = device
         self.debug = debug
         self.params = None
+        self.last = 0
         self.serial = serial.Serial(self.device, 115200)
 
     @staticmethod
@@ -100,6 +101,7 @@ class ADCR25(object):
         if self.debug:
             self.printpacket(data, 'T')
         self.serial.write(self.stuff(data))
+        self.last = time.time()
 
     def readpacket(self):
         # attempt to synchronize
@@ -583,4 +585,30 @@ if __name__ == '__main__':
                 sys.exit(1)
         print('Channel %u set to %3.9g MHz %s' % (args.channo, args.freq, args.mode))
         sys.exit(0)
+
+    curcmd = 'recv'
+    if args.command == curcmd or ( args.__contains__('cmd') and args.cmd == curcmd ):
+        usage = '%%(prog)s [-d device] %s' % curcmd
+        parser = argparse.ArgumentParser(usage=usage, formatter_class=MyHelpFormatter)
+        parser.add_argument('command', help=curcmd)
+        parser.add_argument('-d', '--device', help='Serial port device', default='/dev/ttyUSB0')
+        args = parser.parse_args()
+
+        adcr = ADCR25(args.device)
+        ipkt = adcr.buildpacket(0, b'')
+        try:
+            while True:
+                if time.time()-adcr.last>0.1:
+                    adcr.sendpacket(ipkt)
+                r = adcr.readpacket()
+                if not r or r[0] != 1:
+                    continue
+                rssi = adcr.decode_rssi(r[4:])
+                print('\r%3.9gMHz %s %ddbm' % (rssi['freq']/1000000.0, rssi['smode'], rssi['dbm']), end='')
+                if rssi['inrx']:
+                    print(' %s -> %s' % (rssi['src'], rssi['dst']), end='')
+                else:
+                    print(' '*20, end='')
+        except KeyboardInterrupt:
+            pass
 
