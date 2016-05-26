@@ -691,7 +691,7 @@ if __name__ == '__main__':
                     print('\r%3.9gMHz %s %ddbm' % (rssi['freq']/1000000.0, rssi['smode'], rssi['dbm']), end='')
                     if rssi['inrx']:
                         lstime = time.time()
-                        print(' %s -> %s' % (rssi['src'], rssi['dst']), end='')
+                        print('  %s -> %s' % (rssi['src'], rssi['dst']), end='')
                     else:
                         print('  left %us'%int(args.listen+lstime-time.time()), end='')
                     print("\033[K", end='')
