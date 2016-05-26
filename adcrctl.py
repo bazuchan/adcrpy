@@ -29,19 +29,19 @@ def fromcstr(x):
 class Channel(object):
     def __init__(self, *init):
         if len(init)==6:
-            self.channo, self.chname, self.chtype, self.chscan, self.chflags, self.chfreq = init
+            self.channo, self.chname, self.chmode, self.chscan, self.chflags, self.chfreq = init
         elif len(init)==1 and len(init[0]) == 40:
             self.channo = 0
             self.chname = fromcstr(init[0][0:16])
-            (self.chtype, self.chscan, self.chflags, self.chfreq) = struct.unpack('BBHI', init[0][16:24])
+            (self.chmode, self.chscan, self.chflags, self.chfreq) = struct.unpack('BBHI', init[0][16:24])
         elif len(init)==2 and len(init[1]) == 40:
             self.channo = init[0]
             self.chname = fromcstr(init[1][0:16])
-            (self.chtype, self.chscan, self.chflags, self.chfreq) = struct.unpack('BBHI', init[1][16:24])
+            (self.chmode, self.chscan, self.chflags, self.chfreq) = struct.unpack('BBHI', init[1][16:24])
         else:
             self.channo = -1
             self.chname = u''
-            self.chtype = 0
+            self.chmode = 0
             self.chscan = 0
             self.chflags = 0
             self.chfreq = 0
@@ -51,14 +51,33 @@ class Channel(object):
             r += bytes(struct.pack('H', self.channo))
         chname = bytes(self.chname.encode('utf-8'))[:16]
         r += chname + (16-len(chname))*b'\0'
-        r += bytes(struct.pack('BBHI', self.chtype, self.chscan, self.chflags, self.chfreq))
+        r += bytes(struct.pack('BBHI', self.chmode, self.chscan, self.chflags, self.chfreq))
         r += b'\0'*16
         return r
     def __str__(self):
-        return '%u: %uHz [%s] %s' % (self.channo, self.chfreq, ADCR25.MODES[self.chtype], self.chname)
+        return '%u: %uHz [%s] "%s" %u' % (self.channo, self.chfreq, ADCR25.MODES[self.chmode], self.chname, self.chscan)
     def tocsvline(self):
-        return [self.channo, self.chname, self.chtype, self.chscan, self.chflags, self.chfreq]
+        return [self.channo, self.chname, self.chmode, self.chscan, self.chflags, self.chfreq]
     csvheader = ['CH Num', 'CH Name', 'Type', 'Scan', 'Flags', 'Frequency']
+
+class Params(object):
+    def __init__(self, bparams):
+        if len(bparams) == 172:
+            self.params = bparams
+        else:
+            raise ValueError('Wrong paramaters length')
+    def decode(self):
+        r = {}
+        r['vol'] = self.params[0]
+        r['mode'] = self.params[2]
+        r['equalizer'] = list(self.params[4:12])
+        r['freq'] = struct.unpack('I', self.params[12:16])[0]
+        r['freq2'] = struct.unpack('I', self.params[16:20])[0]
+        return r
+    def tobytes(self):
+        return self.params
+    def set_volume(self, vol):
+        self.params = struct.pack('B', vol) + self.params[1:]
 
 class ADCR25(object):
     MODES = {0:'P25', 1:'DMR', 2:'DMRTS1', 3:'DMRTS2', 4:'YSF', 5:'NXDN48', 6:'NXDN96'}
@@ -210,7 +229,7 @@ class ADCR25(object):
             return True
         return False
 
-    def set_chan(self, chan):
+    def set_ram(self, chan):
         r = self.cmd(8, chan.tobytes(withnum=True))
         if r[0] == 8 and r[2] == 0 and r[3] == 0:
             return True
@@ -253,14 +272,11 @@ class ADCR25(object):
     def get_params(self):
         r = self.cmd(4, b'\x00\x00')
         if r[0] == 4 and r[2] == 0 and r[3] == 172:
-            self.params = r[4:]
-            return True
+            return Params(r[4:176])
         return False
 
-    def set_params(self):
-        if not self.params:
-            return False
-        r = self.cmd(5, self.params)
+    def set_params(self, params):
+        r = self.cmd(5, params.tobytes())
         if r[0] == 5 and r[2] == 0 and r[3] == 0:
             return True
         return False
@@ -270,7 +286,7 @@ class ADCR25(object):
         time.sleep(1)
         r = self.cmd(0, b'')
         if r[0] == 0 and r[2] == 0 and r[3] == 12:
-            sn = base64.b16encode(r[4:12])
+            sn = base64.b16encode(r[4:12]).decode('utf-8')
             ver = '%u.%u' % struct.unpack('BB', r[12:14])
             band = struct.unpack('H', r[14:16])[0]
             return (sn, ver, BANDS[band])
@@ -315,7 +331,7 @@ class ADCR25(object):
         except KeyboardInterrupt:
             sys.stderr.write('\n')
         return freqs
-    
+
     def write_csv(self, fname, channels):
         with open(fname, 'w', newline='') as csvfile:
             writer = csv.writer(csvfile, delimiter=';', quotechar='"', quoting=csv.QUOTE_NONNUMERIC)
@@ -347,9 +363,13 @@ class ADCR25(object):
     def csv2mem(self, fname, ignorenums=False):
         channels = self.read_csv(fname, ignorenums)
         if not channels:
-            return
+            return 0
+        r = 0
         for chno in channels.keys():
-            self.set_mem(channels[chno])
+            if chno>=0 and chno<50:
+                if self.set_mem(channels[chno]):
+                    r += 1
+        return r
 
 def checkcrc(x):
     return ADCR_CRC().update(x[:-2]).digest() == struct.unpack('>H', x[-2:])[0]
@@ -364,7 +384,7 @@ class MyHelpFormatter(argparse.HelpFormatter):
         super(MyHelpFormatter, self).__init__(*kc, **kv)
 
 if __name__ == '__main__':
-    commands = ['scan', 'tune', 'channel']
+    commands = ['info', 'recv', 'scan', 'tune', 'list', 'chan', 'edit', 'mem2csv', 'csv2mem', 'csv2ram']
 
     usage = '%(prog)s [-d device] <command> [command options] ...'
     p = argparse.ArgumentParser(usage=usage, formatter_class=MyHelpFormatter, add_help=False)
@@ -376,10 +396,11 @@ if __name__ == '__main__':
         p.print_help()
         sys.exit(0)
 
-    if args.command == 'scan' or ( args.__contains__('cmd') and args.cmd == 'scan' ):
-        usage = '%(prog)s [-d device] scan [scan options] <start freq MHz> <end freq MHz>'
+    curcmd = 'scan'
+    if args.command == curcmd or ( args.__contains__('cmd') and args.cmd == curcmd ):
+        usage = '%%(prog)s [-d device] %s [scan options] <start freq MHz> <end freq MHz>' % curcmd
         parser = argparse.ArgumentParser(usage=usage, formatter_class=MyHelpFormatter)
-        parser.add_argument('command', help='scan')
+        parser.add_argument('command', help=curcmd)
         parser.add_argument('start', help='Start frequency in MHz', type=float)
         parser.add_argument('end', help='End frequency in MHz', type=float)
         parser.add_argument('-d', '--device', help='Serial port device', default='/dev/ttyUSB0')
@@ -389,7 +410,7 @@ if __name__ == '__main__':
         parser.add_argument('-m', '--modes', help='Comma separated list of communication modes to scan [default: %(default)s]', default='P25,DMR,YSF,NXDN')
         parser.add_argument('-f', '--csv-file', dest='csvfile', help='Also write results to CSV file <file>')
         args = parser.parse_args()
-       
+
         modes = []
         for mode in args.modes.split(','):
             modes.extend({'P25':[0], 'DMR':[1,255], 'YSF':[4], 'NXDN':[5,6]}[mode])
@@ -407,17 +428,159 @@ if __name__ == '__main__':
             adcr.write_csv(args.csvfile, channels)
         sys.exit(0)
 
-    if args.command == 'tune' or ( args.__contains__('cmd') and args.cmd == 'tune' ):
-        usage = '%(prog)s [-d device] tune <freq MHz> <mode>'
+    curcmd = 'tune'
+    if args.command == curcmd or ( args.__contains__('cmd') and args.cmd == curcmd ):
+        usage = '%%(prog)s [-d device] %s <freq MHz> <mode>' % curcmd
         parser = argparse.ArgumentParser(usage=usage, formatter_class=MyHelpFormatter)
-        parser.add_argument('command', help='tune')
+        parser.add_argument('command', help=curcmd)
         parser.add_argument('freq', help='frequency in MHz', type=float)
         parser.add_argument('mode', help='communication mode [default: %(default)s]', nargs='?', default='P25', choices=ADCR25.RMODES.keys())
         parser.add_argument('-d', '--device', help='Serial port device', default='/dev/ttyUSB0')
         args = parser.parse_args()
-       
+
         adcr = ADCR25(args.device)
         adcr.set_freq(int(args.freq*10**6), ADCR25.RMODES[args.mode])
-        print('Tuned to %3.fMhz, %s' % (args.freq, args.mode))
+        print('Tuned to %3.9g Mhz, %s' % (args.freq, args.mode))
+        sys.exit(0)
+
+    curcmd = 'chan'
+    if args.command == curcmd or ( args.__contains__('cmd') and args.cmd == curcmd ):
+        usage = '%%(prog)s [-d device] [-f csv file] %s <channel number>' % curcmd
+        parser = argparse.ArgumentParser(usage=usage, formatter_class=MyHelpFormatter)
+        parser.add_argument('command', help=curcmd)
+        parser.add_argument('channo', help='channel number', type=int)
+        parser.add_argument('-d', '--device', help='Serial port device', default='/dev/ttyUSB0')
+        parser.add_argument('-f', '--csv-file', dest='csvfile', help='Use CSV file instead of receiver memory')
+        args = parser.parse_args()
+
+        adcr = ADCR25(args.device)
+        if args.csvfile:
+            channels = adcr.read_csv(args.csvfile)
+            if not args.channo in channels:
+                sys.stderr.write('No such channel: %u\n'%args.channo)
+                sys.exit(1)
+            chan = channels[args.channo]
+            adcr.set_freq(chan.chfreq, chan.chmode)
+        else:
+            if args.channo>=0 and args.channo<50:
+                chan = adcr.get_mem(args.channo)
+                adcr.select_chan(args.channo)
+            else:
+                sys.stderr.write('No such channel: %u\n'%args.channo)
+                sys.exit(1)
+        print('Set channel to: %s'%chan)
+        sys.exit(0)
+
+    curcmd = 'info'
+    if args.command == curcmd or ( args.__contains__('cmd') and args.cmd == curcmd ):
+        usage = '%%(prog)s [-d device] %s' % curcmd
+        parser = argparse.ArgumentParser(usage=usage, formatter_class=MyHelpFormatter)
+        parser.add_argument('command', help=curcmd)
+        parser.add_argument('-d', '--device', help='Serial port device', default='/dev/ttyUSB0')
+        args = parser.parse_args()
+
+        adcr = ADCR25(args.device)
+        (sn, ver, band) = adcr.get_info()
+        par = adcr.get_params().decode()
+        print('Band: %s, Serial Number: %s, Firmware version: %s' % (band, sn, ver))
+        print('Current frequency: %3.9g Mhz, Mode: %s, Volume: %u' % (par['freq']/1000000.0, adcr.MODES[par['mode']], par['vol']))
+        sys.exit(0)
+
+    curcmd = 'mem2csv'
+    if args.command == curcmd or ( args.__contains__('cmd') and args.cmd == curcmd ):
+        usage = '%%(prog)s [-d device] %s <-f csv file>' % curcmd
+        parser = argparse.ArgumentParser(usage=usage, formatter_class=MyHelpFormatter)
+        parser.add_argument('command', help=curcmd)
+        parser.add_argument('-d', '--device', help='Serial port device', default='/dev/ttyUSB0')
+        parser.add_argument('-f', '--csv-file', dest='csvfile', help='Dump memory contents to CSV file', required=True)
+        args = parser.parse_args()
+
+        adcr = ADCR25(args.device)
+        adcr.mem2csv(args.csvfile)
+        print('Dumping memory contents to file: %s'%args.csvfile)
+        sys.exit(0)
+
+    curcmd = 'csv2mem'
+    if args.command == curcmd or ( args.__contains__('cmd') and args.cmd == curcmd ):
+        usage = '%%(prog)s [-d device] %s <-f csv file>' % curcmd
+        parser = argparse.ArgumentParser(usage=usage, formatter_class=MyHelpFormatter)
+        parser.add_argument('command', help=curcmd)
+        parser.add_argument('-d', '--device', help='Serial port device', default='/dev/ttyUSB0')
+        parser.add_argument('-f', '--csv-file', dest='csvfile', help='Load CSV file into memory', required=True)
+        parser.add_argument('-i', '--ignore-channel-numbers', dest='ignore', help='Ignore channel numbers from CSV file', action='store_true', default=False)
+        args = parser.parse_args()
+
+        adcr = ADCR25(args.device)
+        adcr.csv2mem(args.csvfile, args.ignore)
+        print('Loading file: %s to memory'%args.csvfile)
+        sys.exit(0)
+
+    curcmd = 'csv2ram'
+    if args.command == curcmd or ( args.__contains__('cmd') and args.cmd == curcmd ):
+        usage = '%%(prog)s [-d device] %s <-f csv file>' % curcmd
+        parser = argparse.ArgumentParser(usage=usage, formatter_class=MyHelpFormatter)
+        parser.add_argument('command', help=curcmd)
+        parser.add_argument('-d', '--device', help='Serial port device', default='/dev/ttyUSB0')
+        parser.add_argument('-f', '--csv-file', dest='csvfile', help='Load CSV file into RAM', required=True)
+        parser.add_argument('-i', '--ignore-channel-numbers', dest='ignore', help='Ignore channel numbers from CSV file', action='store_true', default=False)
+        args = parser.parse_args()
+
+        adcr = ADCR25(args.device)
+        adcr.csv2ram(args.csvfile, args.ignore)
+        print('Loading file: %s to memory'%args.csvfile)
+        sys.exit(0)
+
+    curcmd = 'list'
+    if args.command == curcmd or ( args.__contains__('cmd') and args.cmd == curcmd ):
+        usage = '%%(prog)s [-d device] [-f csv file] %s' % curcmd
+        parser = argparse.ArgumentParser(usage=usage, formatter_class=MyHelpFormatter)
+        parser.add_argument('command', help=curcmd)
+        parser.add_argument('-d', '--device', help='Serial port device', default='/dev/ttyUSB0')
+        parser.add_argument('-f', '--csv-file', dest='csvfile', help='Use CSV file instead of receiver memory')
+        args = parser.parse_args()
+
+        adcr = ADCR25(args.device)
+        if args.csvfile:
+            channels = adcr.read_csv(args.csvfile)
+        else:
+            channels = {}
+            for chno in range(0, 50):
+                channels[chno] = adcr.get_mem(chno)
+        print('Channels:')
+        k = list(channels.keys())
+        k.sort()
+        for chno in k:
+            print(channels[chno])
+        sys.exit(0)
+
+    curcmd = 'edit'
+    if args.command == curcmd or ( args.__contains__('cmd') and args.cmd == curcmd ):
+        usage = '%%(prog)s [-d device] [-f csv file] %s <channel number> <freq MHz> mode [name]' % curcmd
+        parser = argparse.ArgumentParser(usage=usage, formatter_class=MyHelpFormatter)
+        parser.add_argument('command', help=curcmd)
+        parser.add_argument('channo', help='channel number', type=int)
+        parser.add_argument('freq', help='frequency in MHz', type=float)
+        parser.add_argument('mode', help='communication mode', choices=ADCR25.RMODES.keys())
+        parser.add_argument('name', help='channel name', nargs='?')
+        parser.add_argument('-d', '--device', help='Serial port device', default='/dev/ttyUSB0')
+        parser.add_argument('-f', '--csv-file', dest='csvfile', help='Use CSV file instead of receiver memory')
+        args = parser.parse_args()
+
+        adcr = ADCR25(args.device)
+        if args.name:
+            name = args.name
+        else:
+            name = '%u %s' % (int(args.freq*10**6), args.mode)
+        if args.csvfile:
+            channels = adcr.read_csv(args.csvfile)
+            channels[args.channo] = Channel(args.channo, name, adcr.RMODES[args.mode], 1, 0, int(args.freq*10**6))
+            adcr.write_csv(args.csvfile, channels.values())
+        else:
+            if args.channo>=0 and args.channo<50:
+                adcr.set_mem(Channel(args.channo, name, adcr.RMODES[args.mode], 1, 0, int(args.freq*10**6)))
+            else:
+                sys.stderr.write('No such channel: %u\n'%args.channo)
+                sys.exit(1)
+        print('Channel %u set to %3.9g MHz %s' % (args.channo, args.freq, args.mode))
         sys.exit(0)
 
