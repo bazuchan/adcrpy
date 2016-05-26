@@ -56,7 +56,7 @@ class Channel(object):
         r += b'\0'*16
         return r
     def __str__(self):
-        return '%u: %uHz [%s] "%s" %u' % (self.channo, self.chfreq, ADCR25.MODES[self.chmode], self.chname, self.chscan)
+        return '%u: %3.9gMHz [%s] "%s" %u' % (self.channo, self.chfreq/1000000.0, ADCR25.MODES[self.chmode], self.chname, self.chscan)
     def tocsvline(self):
         return [self.channo, self.chname, self.chmode, self.chscan, self.chflags, self.chfreq]
     csvheader = ['CH Num', 'CH Name', 'Type', 'Scan', 'Flags', 'Frequency']
@@ -265,6 +265,7 @@ class ADCR25(object):
         r['dbm'] = struct.unpack('b', pkt[3:4])[0]
         r['smode'] = ADCR25.MODES[r['mode']]
         r['freq'] = struct.unpack('I', pkt[20:24])[0]
+        r['nac'] = struct.unpack('H', pkt[8:10])[0]
         if r['mode'] == 4:
             r['src'], r['dst'] = fromcstr(pkt[24:34]), fromcstr(pkt[34:44])
         else:
@@ -641,10 +642,10 @@ if __name__ == '__main__':
                 rssi = adcr.decode_rssi(r[4:])
                 print('\r%3.9gMHz %s %ddbm' % (rssi['freq']/1000000.0, rssi['smode'], rssi['dbm']), end='')
                 if rssi['inrx']:
-                    print('  %s -> %s' % (rssi['src'], rssi['dst']), end='')
+                    print('  %s -> %s, nac: %u' % (rssi['src'], rssi['dst'], rssi['nac']), end='')
                 print("\033[K", end='')
         except KeyboardInterrupt:
-            pass
+            print()
         sys.exit(0)
 
     curcmd = 'scanmem'
@@ -691,11 +692,11 @@ if __name__ == '__main__':
                     print('\r%3.9gMHz %s %ddbm' % (rssi['freq']/1000000.0, rssi['smode'], rssi['dbm']), end='')
                     if rssi['inrx']:
                         lstime = time.time()
-                        print('  %s -> %s' % (rssi['src'], rssi['dst']), end='')
+                        print('  %s -> %s, nac: %u' % (rssi['src'], rssi['dst'], rssi['nac']), end='')
                     else:
                         print('  left %us'%int(args.listen+lstime-time.time()), end='')
                     print("\033[K", end='')
         except KeyboardInterrupt:
-            pass
+            print()
         sys.exit(0)
 
