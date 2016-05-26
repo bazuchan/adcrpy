@@ -87,6 +87,7 @@ class ADCR25(object):
         self.debug = debug
         self.params = None
         self.last = 0
+        self.rssi_timeout = 1
         self.serial = serial.Serial(self.device, 115200)
 
     @staticmethod
@@ -302,6 +303,7 @@ class ADCR25(object):
 
     def scan(self, sfreq, efreq, step, timeout=800, modes=[0], cycles=1, printprogress=False):
         freqs = {}
+        ipkt = self.buildpacket(0, b'')
         try:
             for cycle in range(0, cycles):
                 for freq in range(sfreq, efreq+1, step):
@@ -312,6 +314,8 @@ class ADCR25(object):
                         pkt = self.buildpacket(9, struct.pack('IHBB', freq, int(timeout/10), mode, 0))
                         self.sendpacket(pkt)
                         while True:
+                            if time.time()-self.last>self.rssi_timeout:
+                                self.sendpacket(ipkt)
                             r = self.readpacket()
                             if r and r[0] == 1:
                                 rssi = self.decode_rssi(r[4:])
@@ -598,7 +602,7 @@ if __name__ == '__main__':
         ipkt = adcr.buildpacket(0, b'')
         try:
             while True:
-                if time.time()-adcr.last>0.1:
+                if time.time()-adcr.last>adcr.rssi_timeout:
                     adcr.sendpacket(ipkt)
                 r = adcr.readpacket()
                 if not r or r[0] != 1:
