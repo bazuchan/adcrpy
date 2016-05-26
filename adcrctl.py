@@ -347,6 +347,26 @@ class ADCR25(object):
             sys.stderr.write('\n')
         return freqs
 
+    def chanscan(self, channels, timeout=800, printprogress=False):
+        ipkt = self.buildpacket(0, b'')
+        while True:
+            for chan in channels:
+                if printprogress:
+                    print('\rScanning %s'%chan, end='')
+                    print("\033[K", end='')
+                pkt = self.buildpacket(9, struct.pack('IHBB', chan.chfreq, int(timeout/10), chan.chmode, 0))
+                self.sendpacket(pkt)
+                while True:
+                    if time.time()-self.last>self.rssi_timeout:
+                        self.sendpacket(ipkt)
+                    r = self.readpacket()
+                    if r and r[0] == 1:
+                        rssi = self.decode_rssi(r[4:])
+                        if rssi['inrx']:
+                            return (rssi['freq'], rssi['mode'])
+                    if r and r[0] == 9:
+                        break
+
     def write_csv(self, fname, channels):
         with open(fname, 'w', newline='') as csvfile:
             writer = csv.writer(csvfile, delimiter=';', quotechar='"', quoting=csv.QUOTE_NONNUMERIC)
@@ -399,7 +419,7 @@ class MyHelpFormatter(argparse.HelpFormatter):
         super(MyHelpFormatter, self).__init__(*kc, **kv)
 
 if __name__ == '__main__':
-    commands = ['info', 'recv', 'scan', 'tune', 'list', 'chan', 'edit', 'mem2csv', 'csv2mem', 'csv2ram']
+    commands = ['info', 'recv', 'tune', 'scan', 'list', 'chan', 'scanmem', 'edit', 'mem2csv', 'csv2mem', 'csv2ram']
 
     usage = '%(prog)s [-d device] <command> [command options] ...'
     p = argparse.ArgumentParser(usage=usage, formatter_class=MyHelpFormatter, add_help=False)
@@ -621,9 +641,61 @@ if __name__ == '__main__':
                 rssi = adcr.decode_rssi(r[4:])
                 print('\r%3.9gMHz %s %ddbm' % (rssi['freq']/1000000.0, rssi['smode'], rssi['dbm']), end='')
                 if rssi['inrx']:
-                    print(' %s -> %s' % (rssi['src'], rssi['dst']), end='')
-                else:
-                    print(' '*20, end='')
+                    print('  %s -> %s' % (rssi['src'], rssi['dst']), end='')
+                print("\033[K", end='')
         except KeyboardInterrupt:
             pass
+        sys.exit(0)
+
+    curcmd = 'scanmem'
+    if args.command == curcmd or ( args.__contains__('cmd') and args.cmd == curcmd ):
+        usage = '%%(prog)s [-d device] [-f csv file] %s [options]' % curcmd
+        parser = argparse.ArgumentParser(usage=usage, formatter_class=MyHelpFormatter)
+        parser.add_argument('command', help=curcmd)
+        parser.add_argument('-d', '--device', help='Serial port device', default='/dev/ttyUSB0')
+        parser.add_argument('-f', '--csv-file', dest='csvfile', help='Use CSV file instead of receiver memory')
+        parser.add_argument('-w', '--wait', help='Time (ms) to spend on each frequency and mode [default: %(default)s]', type=int, default=500)
+        parser.add_argument('-l', '--listen', help='Time (s) after signal is gone to start scaning again [default: %(default)s]', type=int, default=15)
+        args = parser.parse_args()
+
+        adcr = ADCR25(args.device)
+        ipkt = adcr.buildpacket(0, b'')
+        if args.csvfile:
+            channels = adcr.read_csv(args.csvfile)
+        else:
+            channels = {}
+            for chno in range(0, 50):
+                channels[chno] = adcr.get_mem(chno)
+
+        toscan = [ch for ch in ADCR25.sortchannels(channels) if ch.chscan]
+        print('Scanning channels:')
+        for ch in toscan:
+            print(ch)
+        print()
+
+        try:
+            while True:
+                (freq, mode) = adcr.chanscan(toscan, args.wait, True)
+                lstime = time.time()
+                adcr.set_freq(freq, mode)
+                while True:
+                    t = time.time()
+                    if t-lstime>args.listen:
+                        break
+                    if t-adcr.last>adcr.rssi_timeout:
+                        adcr.sendpacket(ipkt)
+                    r = adcr.readpacket()
+                    if not r or r[0] != 1:
+                        continue
+                    rssi = adcr.decode_rssi(r[4:])
+                    print('\r%3.9gMHz %s %ddbm' % (rssi['freq']/1000000.0, rssi['smode'], rssi['dbm']), end='')
+                    if rssi['inrx']:
+                        lstime = time.time()
+                        print(' %s -> %s' % (rssi['src'], rssi['dst']), end='')
+                    else:
+                        print('  left %us'%int(args.listen+lstime-time.time()), end='')
+                    print("\033[K", end='')
+        except KeyboardInterrupt:
+            pass
+        sys.exit(0)
 
