@@ -8,6 +8,7 @@ import math
 import time
 import csv
 import argparse
+import os.path
 
 class ADCR_CRC(object):
     TABLE = [ 0x0000, 0x1081, 0x2102, 0x3183, 0x4204, 0x5285, 0x6306, 0x7387, 0x8408, 0x9489, 0xa50a, 0xb58b, 0xc60c, 0xd68d, 0xe70e, 0xf78f]
@@ -97,6 +98,14 @@ class ADCR25(object):
     @staticmethod
     def unstuff(x):
         return x.strip(b'\xc0').replace(b'\xdb\xdc', b'\xc0').replace(b'\xdb\xdd', b'\xdb')
+
+    @staticmethod
+    def sortchannels(x):
+        if x is list:
+            x = dict(zip([ch.channo for ch in x], x))
+        t = list(x.keys())
+        t.sort()
+        return [x[n] for n in t]
 
     def sendpacket(self, data):
         if self.debug:
@@ -415,6 +424,7 @@ if __name__ == '__main__':
         parser.add_argument('-c', '--cycles', help='Number of times loop through frequencies [default: %(default)s]', type=int, default=1)
         parser.add_argument('-m', '--modes', help='Comma separated list of communication modes to scan [default: %(default)s]', default='P25,DMR,YSF,NXDN')
         parser.add_argument('-f', '--csv-file', dest='csvfile', help='Also write results to CSV file <file>')
+        parser.add_argument('-a', '--append', action='store_true', help='Do not overwrite CSV file but append found result', default=False)
         args = parser.parse_args()
 
         modes = []
@@ -423,15 +433,18 @@ if __name__ == '__main__':
         adcr = ADCR25(args.device)
         res = adcr.scan(int(args.start*10**6), int(args.end*10**6), int(args.step*10**3), timeout=args.wait, modes=modes, cycles=args.cycles, printprogress=True)
         print('Found:')
-        channels = []
+        if args.append and args.csvfile and os.path.exists(args.csvfile):
+            channels = adcr.read_csv(args.csvfile)
+        else:
+            channels = {}
         for freq in res.keys():
             for mode in res[freq].keys():
                 print('%u %s %d dbm' % (freq, ADCR25.MODES[mode], res[freq][mode]))
-                if args.csvfile:
-                    channels.append(Channel(len(channels), '%u %s' % (freq,ADCR25.MODES[mode]), mode, 1, 0, freq))
+                if args.csvfile and (freq, mode) not in [(ch.chfreq, ch.chmode) for ch in channels.values()]:
+                    channels[len(channels)] = Channel(len(channels), '%u %s' % (freq,ADCR25.MODES[mode]), mode, 1, 0, freq)
         if args.csvfile:
             print('Saving scan results to %s'%args.csvfile)
-            adcr.write_csv(args.csvfile, channels)
+            adcr.write_csv(args.csvfile, ADCR25.sortchannels(channels))
         sys.exit(0)
 
     curcmd = 'tune'
@@ -553,10 +566,8 @@ if __name__ == '__main__':
             for chno in range(0, 50):
                 channels[chno] = adcr.get_mem(chno)
         print('Channels:')
-        k = list(channels.keys())
-        k.sort()
-        for chno in k:
-            print(channels[chno])
+        for ch in ADCR25.sortchannels(channels):
+            print(ch)
         sys.exit(0)
 
     curcmd = 'edit'
