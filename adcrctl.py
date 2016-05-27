@@ -29,16 +29,23 @@ def fromcstr(x):
 
 class Channel(object):
     def __init__(self, *init):
-        if len(init)==6:
-            self.channo, self.chname, self.chmode, self.chscan, self.chflags, self.chfreq = init
+        if len(init)>=6:
+            self.channo, self.chname, self.chmode, self.chscan, self.chflags, self.chfreq = init[:6]
+            self.filter_ids = [0]*8
+            if len(init)==7:
+                self.filter_ids = init[8]
+            elif len(init)>7:
+                self.chflags = (init[6]<<8)|(init[7]<<9)
         elif len(init)==1 and len(init[0]) == 40:
             self.channo = 0
             self.chname = fromcstr(init[0][0:16])
             (self.chmode, self.chscan, self.chflags, self.chfreq) = struct.unpack('BBHI', init[0][16:24])
+            self.filter_ids = struct.unpack('HHHHHHHH', init[0][24:40])
         elif len(init)==2 and len(init[1]) == 40:
             self.channo = init[0]
             self.chname = fromcstr(init[1][0:16])
             (self.chmode, self.chscan, self.chflags, self.chfreq) = struct.unpack('BBHI', init[1][16:24])
+            self.filter_ids = struct.unpack('HHHHHHHH', init[1][24:40])
         else:
             self.channo = -1
             self.chname = u''
@@ -46,6 +53,9 @@ class Channel(object):
             self.chscan = 0
             self.chflags = 0
             self.chfreq = 0
+            self.filter_ids = [0]*8
+        self.filter_enabled = self.chflags&256 == 256
+        self.filter_invert = self.chflags&512 == 512
     def tobytes(self, withnum=False):
         r = b''
         if withnum:
@@ -53,13 +63,13 @@ class Channel(object):
         chname = bytes(self.chname.encode('utf-8'))[:16]
         r += chname + (16-len(chname))*b'\0'
         r += bytes(struct.pack('BBHI', self.chmode, self.chscan, self.chflags, self.chfreq))
-        r += b'\0'*16
+        r += bytes(struct.pack('HHHHHHHH', *self.filter_ids))
         return r
     def __str__(self):
-        return '%u: %3.9gMHz [%s] "%s" %u' % (self.channo, self.chfreq/1000000.0, ADCR25.MODES[self.chmode], self.chname, self.chscan)
+        return '%u: %3.9gMHz %s "%s" %s %s%s [%u %u %u %u %u %u %u %u]' % (self.channo, self.chfreq/1000000.0, ADCR25.MODES[self.chmode], self.chname, ['noscan', 'scan'][self.chscan], ['unfiltered', 'filter'][int(self.filter_enabled)], ['', ' invert'][int(self.filter_invert)], *self.filter_ids)
     def tocsvline(self):
         return [self.channo, self.chname, self.chmode, self.chscan, self.chflags, self.chfreq]
-    csvheader = ['CH Num', 'CH Name', 'Type', 'Scan', 'Flags', 'Frequency']
+    csvheader = ['CH Num', 'CH Name', 'Type', 'Scan', 'Flags', 'Frequency'] + ['NAC%u'%i for i in range(0,8)]
 
 class Params(object):
     def __init__(self, bparams):
@@ -72,13 +82,38 @@ class Params(object):
         r['vol'] = self.params[0]
         r['mode'] = self.params[2]
         r['equalizer'] = list(self.params[4:12])
-        r['freq'] = struct.unpack('I', self.params[12:16])[0]
-        r['freq2'] = struct.unpack('I', self.params[16:20])[0]
+        r['freq'] = self.get(12, 'I')[0]
+        r['freq2'] = self.get(16, 'I')[0]
+        r['autoscan'] = self.get(24, 'H')[0]&512 == 512
+        r['autoscan_wait'] = self.get(20, 'H')[0]
+        r['autoscan_hold'] = self.get(22, 'H')[0]/1000
+        r['filter_nac_ids'] = self.get(28, 'HHHHHHHH')
+        r['filter_nac_invert'] = self.get(24, 'H')[0]&256 == 256
+        r['filter_nac_enable'] = self.get(24, 'H')[0]&128 == 128
+        r['filter_group_bank'] = self.get(24, 'H')[0]&3
+        grp_offset = 44 + (r['filter_group_bank']) * 32
+        grp_invert_bit = 1<<(r['filter_group_bank']+2)
+        r['filter_group_ids'] = self.get(grp_offset, 'IIIIIIII')
+        r['filter_group_invert'] = self.get(24, 'H')[0]&grp_invert_bit == grp_invert_bit
+        r['filter_group_enable'] = self.get(24, 'H')[0]&64 == 64
         return r
     def tobytes(self):
         return self.params
+    def set(self, pos, stype, *val):
+        slen = struct.calcsize(stype)
+        self.params = self.params[:pos] + struct.pack(stype, *val) + self.params[pos+slen:]
+    def get(self, pos, stype):
+        slen = struct.calcsize(stype)
+        return struct.unpack(stype, self.params[pos:pos+slen])
     def set_volume(self, vol):
-        self.params = struct.pack('B', vol) + self.params[1:]
+        self.set(0, 'B', vol)
+    def set_autoscan(self, autoscan, wait=500, listen=15):
+        if autoscan:
+            self.set(20, 'H', wait)
+            self.set(22, 'H', listen*1000)
+            self.set(24, 'H', self.get(24, 'H')[0]|512)
+        else:
+            self.set(24, 'H', self.get(24, 'H')[0]&65023)
 
 class ADCR25(object):
     MODES = {0:'P25', 1:'DMR', 2:'DMRTS1', 3:'DMRTS2', 4:'YSF', 5:'NXDN48', 6:'NXDN96'}
@@ -420,7 +455,7 @@ class MyHelpFormatter(argparse.HelpFormatter):
         super(MyHelpFormatter, self).__init__(*kc, **kv)
 
 if __name__ == '__main__':
-    commands = ['info', 'recv', 'tune', 'scan', 'list', 'chan', 'scanmem', 'edit', 'mem2csv', 'csv2mem', 'csv2ram']
+    commands = ['info', 'recv', 'tune', 'scan', 'list', 'chan', 'scanmem', 'autoscan', 'edit', 'mem2csv', 'csv2mem', 'csv2ram']
 
     usage = '%(prog)s [-d device] <command> [command options] ...'
     p = argparse.ArgumentParser(usage=usage, formatter_class=MyHelpFormatter, add_help=False)
@@ -524,6 +559,9 @@ if __name__ == '__main__':
         par = adcr.get_params().decode()
         print('Band: %s, Serial Number: %s, Firmware version: %s' % (band, sn, ver))
         print('Current frequency: %3.9g Mhz, Mode: %s, Volume: %u' % (par['freq']/1000000.0, adcr.MODES[par['mode']], par['vol']))
+        print('Autoscan: %s, Wait: %ums, Hold: %us' % (par['autoscan'], par['autoscan_wait'], par['autoscan_hold']))
+        print('NAC filtering: %s, Invert: %s, NACs: %s' % (par['filter_nac_enable'], par['filter_nac_invert'], ' '.join(['%u'%i for i in par['filter_nac_ids']])))
+        print('Group filtering: %s, Bank: %u, Invert: %s, NACs: %s' % (par['filter_group_enable'], par['filter_group_bank'], par['filter_group_invert'], ' '.join(['%u'%i for i in par['filter_group_ids']])))
         sys.exit(0)
 
     curcmd = 'mem2csv'
