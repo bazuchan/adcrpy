@@ -111,6 +111,10 @@ class Params(object):
         r['filter_group_ids'] = self.get(grp_offset, 'IIIIIIII')
         r['filter_group_invert'] = self.get(24, 'H')[0]&grp_invert_bit == grp_invert_bit
         r['filter_group_enable'] = self.get(24, 'H')[0]&64 == 64
+        r['filter_group_banks_ids'] = []
+        for b in range(0, 3):
+            grp_offset = 44 + (b) * 32
+            r['filter_group_banks_ids'].append(self.get(grp_offset, 'IIIIIIII'))
         return r
 
     def tobytes(self):
@@ -141,6 +145,14 @@ class Params(object):
         rbits = (1<<7)|(1<<8)
         control = self.get(24, 'H')[0] & ~rbits | bits
         self.set(24, 'H', control)
+
+    def set_filters_group(self, bank, grfilt, grinv, group_ids):
+        rbit = (1<<(bank+2))|(1<<6)
+        bit = (grinv<<(bank+2))|(grfilt<<6)
+        control = (self.get(24, 'H')[0] & ~3 | bank) & ~rbit | bit
+        self.set(24, 'H', control)
+        grp_offset = 44 + (bank) * 32
+        self.set(grp_offset, 'IIIIIIII', *group_ids)
 
     def set_freq(self, freq, mode=0):
         self.set(12, 'I', freq)
@@ -501,7 +513,7 @@ class MyHelpFormatter(argparse.HelpFormatter):
         super(MyHelpFormatter, self).__init__(*kc, **kv)
 
 if __name__ == '__main__':
-    commands = ['info', 'recv', 'tune', 'scan', 'list', 'chan', 'scanmem', 'replace', 'mem2csv', 'csv2mem', 'csv2ram']
+    commands = ['info', 'filter', 'recv', 'tune', 'scan', 'list', 'chan', 'scanmem', 'replace', 'mem2csv', 'csv2mem', 'csv2ram']
 
     usage = '%(prog)s [-d device] <command> [command options] ...'
     p = argparse.ArgumentParser(usage=usage, formatter_class=MyHelpFormatter, add_help=False)
@@ -813,5 +825,56 @@ if __name__ == '__main__':
                     print("\033[K", end='')
         except KeyboardInterrupt:
             print()
+        sys.exit(0)
+
+    curcmd = 'filter'
+    if args.command == curcmd or ( args.__contains__('cmd') and args.cmd == curcmd ):
+        usage = '%%(prog)s [-d device] %s [options]' % curcmd
+        parser = argparse.ArgumentParser(usage=usage, formatter_class=MyHelpFormatter)
+        parser.add_argument('command', help=curcmd)
+        parser.add_argument('-d', '--device', help='Serial port device', default='/dev/ttyUSB0')
+        parser.add_argument('-n', '--nac-filter', dest='nacfilter', choices=['include', 'exclude', 'off'], help='Change NACs filter mode to')
+        parser.add_argument('-a', '--nacs', help='Change NACs filter table to list of comma-separated NACs')
+        parser.add_argument('-g', '--group-filter', dest='groupfilter', choices=['include', 'exclude', 'off'], help='Change groups filter mode to')
+        parser.add_argument('-b', '--group-filter-bank', dest='groupfilterbank', type=int, choices=[0,1,2,3], help='Change groups filter bank to')
+        parser.add_argument('-r', '--groups', help='Change groups filter table to list of comma-separated groups')
+        args = parser.parse_args()
+
+        adcr = ADCR25(args.device)
+        par = adcr.get_params()
+        current = par.decode()
+        if args.nacfilter:
+            chfilt = args.nacfilter != 'off'
+            chfinv = args.nacfilter == 'exclude'
+        else:
+            chfilt = current['filter_nac_enable']
+            chfinv = current['filter_nac_invert']
+        if args.nacs:
+            filter_ids = [int(i) for i in args.nacs.split(',')]
+        else:
+            filter_ids = current['filter_nac_ids']
+        par.set_filters_nac(chfilt, chfinv, filter_ids)
+
+        if args.groupfilterbank:
+            bank = args.groupfilterbank
+        else:
+            bank = current['filter_group_bank']
+        if args.groupfilter:
+            grfilt = args.groupfilter != 'off'
+            grinv = args.groupfilter == 'exclude'
+        elif bank==current['filter_group_bank']:
+            grfilt = current['filter_group_enable']
+            grinv = current['filter_group_invert']
+        else:
+            sys.stderr.write('Error: you have to specify --group-filter when changing banks\n')
+            sys.exit(0)
+        if args.groups:
+            group_ids = [int(i) for i in args.groups.split(',')]
+        else:
+            group_ids = current['filter_group_banks_ids'][bank]
+        par.set_filters_group(bank, grfilt, grinv, group_ids)
+
+        adcr.set_params(par)
+        print('Filter settings updated, use %s info to see results' % (sys.argv[0]))
         sys.exit(0)
 
