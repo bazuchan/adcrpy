@@ -79,6 +79,9 @@ class Channel(object):
         chan = self.fromtuple(*init)
         return chan
 
+    def nmode(self):
+        return ADCR25.RMODES[self.chmode]
+
     def __str__(self):
         return '%u: %3.9gMHz %s "%s" %s %s %s %s' % (self.channo, self.chfreq/1000000.0, self.chmode, self.chname, ['noscan', 'scan'][self.chscan], ['unfiltered', 'filter'][self.chfilt], ['only', 'exclude'][self.chfinv], ' '.join(['%u'%i for i in self.filter_ids]))
 
@@ -132,9 +135,25 @@ class Params(object):
         else:
             self.set(24, 'H', self.get(24, 'H')[0]&65023)
 
+    def set_filters_nac(self, chfilt, chfinv, filter_ids):
+        self.set(28, 'HHHHHHHH', *filter_ids)
+        bits = (chfilt<<7)|(chfinv<<8)
+        rbits = (1<<7)|(1<<8)
+        control = self.get(24, 'H')[0] & ~rbits | bits
+        self.set(24, 'H', control)
+
+    def set_freq(self, freq, mode=0):
+        self.set(12, 'I', freq)
+        self.set(2, 'B', mode)
+
+    def set_chan(self, chan):
+        self.set_freq(chan.chfreq, chan.nmode())
+        self.set_filters_nac(chan.chfilt, chan.chfinv, chan.filter_ids)
+
 class ADCR25(object):
     MODES = {0:'P25', 1:'DMR', 2:'DMRTS1', 3:'DMRTS2', 4:'YSF', 5:'NXDN48', 6:'NXDN96'}
     RMODES = dict(zip(MODES.values(), MODES.keys()))
+    NUMCHAN = 150
     def __init__(self, device='/dev/ttyUSB0', debug = False):
         self.device = device
         self.debug = debug
@@ -298,11 +317,17 @@ class ADCR25(object):
             return True
         return False
 
-    def select_chan(self, channo, flush=0):
-        r = self.cmd(6, struct.pack('BB', channo, flush))
+    def select_chan_hw(self, channo):
+        # do not use, it's a crippled method
+        r = self.cmd(6, struct.pack('BB', channo, 0))
         if r[0] == 6 and r[2] == 0 and r[3] == 0:
             return True
         return False
+
+    def select_chan_ext(self, chan):
+        par = self.get_params()
+        par.set_chan(chan)
+        self.set_params(par)
 
     @staticmethod
     def decode_rssi(pkt):
@@ -401,23 +426,30 @@ class ADCR25(object):
 
     def chanscan(self, channels, timeout=800, printprogress=False):
         ipkt = self.buildpacket(0, b'')
+        par = self.get_params()
         while True:
             for chan in channels:
                 if printprogress:
                     print('\rScanning %s'%chan, end='')
                     print("\033[K", end='')
-                pkt = self.buildpacket(9, struct.pack('IHBB', chan.chfreq, int(timeout/10), ADCR25.RMODES[chan.chmode], 0))
+                par.set_chan(chan)
+                pkt = self.buildpacket(5, par.tobytes())
                 self.sendpacket(pkt)
+                wait = None
                 while True:
                     if time.time()-self.last>self.rssi_timeout:
                         self.sendpacket(ipkt)
                     r = self.readpacket()
                     if r and r[0] == 1:
                         rssi = self.decode_rssi(r[4:])
+                        if (rssi['freq'], rssi['mode']) != (chan.chfreq, chan.nmode()):
+                            continue
                         if rssi['inrx']:
-                            return (rssi['freq'], rssi['mode'])
-                    if r and r[0] == 9:
-                        break
+                            return (rssi['freq'], rssi['mode'], chan.channo)
+                        if not wait:
+                            wait = time.time()
+                        elif time.time()-wait>timeout/1000.0:
+                            break
 
     def write_csv(self, fname, channels):
         with open(fname, 'w', newline='') as csvfile:
@@ -441,7 +473,7 @@ class ADCR25(object):
 
     def mem2csv(self, fname):
         channels = []
-        for chno in range(0, 50):
+        for chno in range(0, self.NUMCHAN):
             channels.append(self.get_mem(chno))
         self.write_csv(fname, channels)
 
@@ -451,7 +483,7 @@ class ADCR25(object):
             return 0
         r = 0
         for chno in channels.keys():
-            if chno>=0 and chno<50:
+            if chno>=0 and chno<self.NUMCHAN:
                 if self.set_mem(channels[chno]):
                     r += 1
         return r
@@ -510,7 +542,7 @@ if __name__ == '__main__':
         for freq in res.keys():
             for mode in res[freq].keys():
                 print('%u %s %d dbm' % (freq, ADCR25.MODES[mode], res[freq][mode]))
-                if args.csvfile and (freq, mode) not in [(ch.chfreq, ADCR25.RMODES[ch.chmode]) for ch in channels.values()]:
+                if args.csvfile and (freq, mode) not in [(ch.chfreq, ch.nmode()) for ch in channels.values()]:
                     channels[len(channels)] = Channel.fromtuple(len(channels), '%u %s' % (freq,mode), ADCR25.RMODES[mode], freq)
         if args.csvfile:
             print('Saving scan results to %s'%args.csvfile)
@@ -549,11 +581,11 @@ if __name__ == '__main__':
                 sys.stderr.write('No such channel: %u\n'%args.channo)
                 sys.exit(1)
             chan = channels[args.channo]
-            adcr.set_freq(chan.chfreq, ADCR25.RMODES[chan.chmode])
+            adcr.select_chan_ext(chan)
         else:
-            if args.channo>=0 and args.channo<50:
+            if args.channo>=0 and args.channo<ADCR25.NUMCHAN:
                 chan = adcr.get_mem(args.channo)
-                adcr.select_chan(args.channo)
+                adcr.select_chan_ext(chan)
             else:
                 sys.stderr.write('No such channel: %u\n'%args.channo)
                 sys.exit(1)
@@ -636,7 +668,7 @@ if __name__ == '__main__':
             channels = adcr.read_csv(args.csvfile)
         else:
             channels = {}
-            for chno in range(0, 50):
+            for chno in range(0, ADCR25.NUMCHAN):
                 channels[chno] = adcr.get_mem(chno)
         print('Channels:')
         for ch in ADCR25.sortchannels(channels):
@@ -680,7 +712,7 @@ if __name__ == '__main__':
             channels[args.channo] = chan
             adcr.write_csv(args.csvfile, channels.values())
         else:
-            if args.channo>=0 and args.channo<50:
+            if args.channo>=0 and args.channo<ADCR25.NUMCHAN:
                 adcr.set_mem(chan)
             else:
                 sys.stderr.write('No such channel: %u\n'%args.channo)
@@ -749,7 +781,7 @@ if __name__ == '__main__':
             channels = adcr.read_csv(args.csvfile)
         else:
             channels = {}
-            for chno in range(0, 50):
+            for chno in range(0, ADCR25.NUMCHAN):
                 channels[chno] = adcr.get_mem(chno)
 
         toscan = [ch for ch in ADCR25.sortchannels(channels) if ch.chscan]
@@ -760,9 +792,8 @@ if __name__ == '__main__':
 
         try:
             while True:
-                (freq, mode) = adcr.chanscan(toscan, args.wait, True)
+                (freq, mode, chno) = adcr.chanscan(toscan, args.wait, True)
                 lstime = time.time()
-                adcr.set_freq(freq, mode)
                 while True:
                     t = time.time()
                     if t-lstime>args.listen:
@@ -773,7 +804,7 @@ if __name__ == '__main__':
                     if not r or r[0] != 1:
                         continue
                     rssi = adcr.decode_rssi(r[4:])
-                    print('\r%3.9gMHz %s %ddbm' % (rssi['freq']/1000000.0, rssi['smode'], rssi['dbm']), end='')
+                    print('\r%u: %3.9gMHz %s %ddbm' % (chno, rssi['freq']/1000000.0, rssi['smode'], rssi['dbm']), end='')
                     if rssi['inrx']:
                         lstime = time.time()
                         print('  %s -> %s, nac: %u' % (rssi['src'], rssi['dst'], rssi['nac']), end='')
