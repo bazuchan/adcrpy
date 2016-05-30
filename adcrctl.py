@@ -436,7 +436,7 @@ class ADCR25(object):
             sys.stderr.write('\n')
         return freqs
 
-    def chanscan(self, channels, timeout=800, printprogress=False):
+    def chanscan(self, channels, timeout=800, fast=False, printprogress=False):
         ipkt = self.buildpacket(0, b'')
         par = self.get_params()
         while True:
@@ -444,8 +444,11 @@ class ADCR25(object):
                 if printprogress:
                     print('\rScanning %s'%chan, end='')
                     print("\033[K", end='')
-                par.set_chan(chan)
-                pkt = self.buildpacket(5, par.tobytes())
+                if fast:
+                    pkt = self.buildpacket(10, struct.pack('IBB', chan.chfreq, chan.nmode(), 0))
+                else:
+                    par.set_chan(chan)
+                    pkt = self.buildpacket(5, par.tobytes())
                 self.sendpacket(pkt)
                 wait = None
                 while True:
@@ -767,8 +770,9 @@ if __name__ == '__main__':
         parser.add_argument('-f', '--csv-file', dest='csvfile', help='Use CSV file instead of receiver memory')
         parser.add_argument('-w', '--wait', help='Time (ms) to spend on each frequency and mode [default: %(default)s]', type=int, default=500)
         parser.add_argument('-l', '--listen', help='Time (s) after signal is gone to start scaning again [default: %(default)s]', type=int, default=15)
+        parser.add_argument('-s', '--fast', action='store_true', help='Only use frequency and mode from channel list (skip filters)', default=False)
         parser.add_argument('-o', '--offline', action='store_true', help='Scan in hardware, even after disconnect', default=False)
-        parser.add_argument('-s', '--stop', action='store_true', help='Stop offline scan', default=False)
+        parser.add_argument('-p', '--stop', action='store_true', help='Stop offline scan', default=False)
         args = parser.parse_args()
 
         adcr = ADCR25(args.device)
@@ -804,7 +808,7 @@ if __name__ == '__main__':
 
         try:
             while True:
-                (freq, mode, chno) = adcr.chanscan(toscan, args.wait, True)
+                (freq, mode, chno) = adcr.chanscan(toscan, args.wait, args.fast, True)
                 lstime = time.time()
                 while True:
                     t = time.time()
