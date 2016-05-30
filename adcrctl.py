@@ -28,48 +28,59 @@ def fromcstr(x):
     return x[:x.find(b'\0')].decode('utf-8')
 
 class Channel(object):
-    def __init__(self, *init):
-        if len(init)>=6:
-            self.channo, self.chname, self.chmode, self.chscan, self.chflags, self.chfreq = init[:6]
-            self.filter_ids = [0]*8
-            if len(init)==7:
-                self.filter_ids = init[8]
-            elif len(init)>7:
-                self.chflags = (init[6]<<8)|(init[7]<<9)
-        elif len(init)==1 and len(init[0]) == 40:
-            self.channo = 0
-            self.chname = fromcstr(init[0][0:16])
-            (self.chmode, self.chscan, self.chflags, self.chfreq) = struct.unpack('BBHI', init[0][16:24])
-            self.filter_ids = struct.unpack('HHHHHHHH', init[0][24:40])
-        elif len(init)==2 and len(init[1]) == 40:
-            self.channo = init[0]
-            self.chname = fromcstr(init[1][0:16])
-            (self.chmode, self.chscan, self.chflags, self.chfreq) = struct.unpack('BBHI', init[1][16:24])
-            self.filter_ids = struct.unpack('HHHHHHHH', init[1][24:40])
-        else:
-            self.channo = -1
-            self.chname = u''
-            self.chmode = 0
-            self.chscan = 0
-            self.chflags = 0
-            self.chfreq = 0
-            self.filter_ids = [0]*8
-        self.filter_enabled = self.chflags&256 == 256
-        self.filter_invert = self.chflags&512 == 512
+    csvheader = ['CH Num', 'CH Name', 'Type', 'Frequency', 'Scan', 'Filter', 'Except'] + ['NAC%u'%i for i in range(0,8)]
+    csvtypes = [int, str, str, int, lambda x:int(bool(int(x))), lambda x:int(bool(int(x))), lambda x:int(bool(int(x)))] + [int]*8
+
+    def __init__(self):
+        self.channo = -1
+        self.chname = u''
+        self.chmode = 'P25'
+        self.chfreq = 0
+        self.chscan = 1
+        self.chfilt = 0
+        self.chfinv = 0
+        self.filter_ids = [0]*8
+
+    @classmethod
+    def fromtuple(self, *init):
+        chan = self()
+        chan.channo, chan.chname, chan.chmode, chan.chfreq = init[:4]
+        if len(init)==15:
+            (chan.chscan, chan.chfilt, chan.chfinv, *chan.filter_ids) = init[4:]
+        return chan
+
+    @classmethod
+    def frombytes(self, init, channo=0):
+        chan = self()
+        chan.channo = channo
+        chan.chname = fromcstr(init[0:16])
+        (chmode, chan.chscan, chflags, chan.chfreq) = struct.unpack('BBHI', init[16:24])
+        chan.chmode = ADCR25.MODES[chmode]
+        (chan.chfilt, chan.chfinv) = (int(chflags&256 == 256), int(chflags&512 == 512))
+        chan.filter_ids = struct.unpack('HHHHHHHH', init[24:40])
+        return chan
+
     def tobytes(self, withnum=False):
         r = b''
         if withnum:
             r += bytes(struct.pack('H', self.channo))
         chname = bytes(self.chname.encode('utf-8'))[:16]
         r += chname + (16-len(chname))*b'\0'
-        r += bytes(struct.pack('BBHI', self.chmode, self.chscan, self.chflags, self.chfreq))
+        r += bytes(struct.pack('BBHI', ADCR25.RMODES[self.chmode], self.chscan, (self.chfilt<<8)|(self.chfinv<<9), self.chfreq))
         r += bytes(struct.pack('HHHHHHHH', *self.filter_ids))
         return r
-    def __str__(self):
-        return '%u: %3.9gMHz %s "%s" %s %s%s [%u %u %u %u %u %u %u %u]' % (self.channo, self.chfreq/1000000.0, ADCR25.MODES[self.chmode], self.chname, ['noscan', 'scan'][self.chscan], ['unfiltered', 'filter'][int(self.filter_enabled)], ['', ' invert'][int(self.filter_invert)], *self.filter_ids)
+
     def tocsvline(self):
-        return [self.channo, self.chname, self.chmode, self.chscan, self.chflags, self.chfreq]
-    csvheader = ['CH Num', 'CH Name', 'Type', 'Scan', 'Flags', 'Frequency'] + ['NAC%u'%i for i in range(0,8)]
+        return [self.channo, self.chname, self.chmode, self.chfreq, self.chscan, self.chfilt, self.chfinv, *self.filter_ids]
+
+    @classmethod
+    def fromcsvline(self, init):
+        init = [self.csvtypes[i](init[i]) for i in range(0, len(init))]
+        chan = self.fromtuple(*init)
+        return chan
+
+    def __str__(self):
+        return '%u: %3.9gMHz %s "%s" %s %s %s %s' % (self.channo, self.chfreq/1000000.0, self.chmode, self.chname, ['noscan', 'scan'][self.chscan], ['unfiltered', 'filter'][self.chfilt], ['only', 'exclude'][self.chfinv], ' '.join(['%u'%i for i in self.filter_ids]))
 
 class Params(object):
     def __init__(self, bparams):
@@ -77,6 +88,7 @@ class Params(object):
             self.params = bparams
         else:
             raise ValueError('Wrong paramaters length')
+
     def decode(self):
         r = {}
         r['vol'] = self.params[0]
@@ -97,16 +109,21 @@ class Params(object):
         r['filter_group_invert'] = self.get(24, 'H')[0]&grp_invert_bit == grp_invert_bit
         r['filter_group_enable'] = self.get(24, 'H')[0]&64 == 64
         return r
+
     def tobytes(self):
         return self.params
+
     def set(self, pos, stype, *val):
         slen = struct.calcsize(stype)
         self.params = self.params[:pos] + struct.pack(stype, *val) + self.params[pos+slen:]
+
     def get(self, pos, stype):
         slen = struct.calcsize(stype)
         return struct.unpack(stype, self.params[pos:pos+slen])
+
     def set_volume(self, vol):
         self.set(0, 'B', vol)
+
     def set_autoscan(self, autoscan, wait=500, listen=15):
         if autoscan:
             self.set(20, 'H', wait)
@@ -121,7 +138,6 @@ class ADCR25(object):
     def __init__(self, device='/dev/ttyUSB0', debug = False):
         self.device = device
         self.debug = debug
-        self.params = None
         self.last = 0
         self.rssi_timeout = 1
         self.serial = serial.Serial(self.device, 115200)
@@ -207,17 +223,17 @@ class ADCR25(object):
             if x[2] == 0 and x[3] == 2:
                 return 'Get mem, chan %u' % struct.unpack('H', x[4:6])
             else:
-                return 'Get mem resp: %s' % Channel(x[4:44])
+                return 'Get mem resp: %s' % Channel.frombytes(x[4:44])
         if x[0]==3:
             if x[2] == 0 and x[3] == 0:
                 return 'Set mem ACK'
             else:
-                return 'Set mem chan %u, data %s' % (struct.unpack('H', x[4:6])[0], Channel(x[6:46]))
+                return 'Set mem chan %u, data %s' % (struct.unpack('H', x[4:6])[0], Channel.frombytes(x[6:46]))
         if x[0]==8:
             if x[2] == 0 and x[3] == 0:
                 return 'Set chan ACK'
             else:
-                return 'Set chan chan %u, data %s' % (struct.unpack('H', x[4:6])[0], Channel(x[6:46]))
+                return 'Set chan chan %u, data %s' % (struct.unpack('H', x[4:6])[0], Channel.frombytes(x[6:46]))
         if x[0]==6:
             if x[2] == 0 and x[3] == 0:
                 return 'Select chan ACK'
@@ -266,7 +282,7 @@ class ADCR25(object):
     def get_mem(self, channo):
         r = self.cmd(2, struct.pack('H', channo))
         if r[0] == 2 and r[2] == 0 and r[3] == 40:
-            chan = Channel(channo, r[4:44])
+            chan = Channel.frombytes(r[4:44], channo)
             return chan
         return None
 
@@ -390,7 +406,7 @@ class ADCR25(object):
                 if printprogress:
                     print('\rScanning %s'%chan, end='')
                     print("\033[K", end='')
-                pkt = self.buildpacket(9, struct.pack('IHBB', chan.chfreq, int(timeout/10), chan.chmode, 0))
+                pkt = self.buildpacket(9, struct.pack('IHBB', chan.chfreq, int(timeout/10), ADCR25.RMODES[chan.chmode], 0))
                 self.sendpacket(pkt)
                 while True:
                     if time.time()-self.last>self.rssi_timeout:
@@ -417,9 +433,7 @@ class ADCR25(object):
             if reader.__next__() != Channel.csvheader:
                 return {}
             for row in reader:
-                chan = Channel(int(row[0]), row[1], int(row[2]), int(row[3]), int(row[4]), int(row[5]))
-                if chan.channo == -1:
-                    continue
+                chan = Channel.fromcsvline(row)
                 if ignorenums:
                     chan.channo = len(channels)
                 channels[chan.channo] = chan
@@ -455,7 +469,7 @@ class MyHelpFormatter(argparse.HelpFormatter):
         super(MyHelpFormatter, self).__init__(*kc, **kv)
 
 if __name__ == '__main__':
-    commands = ['info', 'recv', 'tune', 'scan', 'list', 'chan', 'scanmem', 'autoscan', 'edit', 'mem2csv', 'csv2mem', 'csv2ram']
+    commands = ['info', 'recv', 'tune', 'scan', 'list', 'chan', 'scanmem', 'replace', 'mem2csv', 'csv2mem', 'csv2ram']
 
     usage = '%(prog)s [-d device] <command> [command options] ...'
     p = argparse.ArgumentParser(usage=usage, formatter_class=MyHelpFormatter, add_help=False)
@@ -496,8 +510,8 @@ if __name__ == '__main__':
         for freq in res.keys():
             for mode in res[freq].keys():
                 print('%u %s %d dbm' % (freq, ADCR25.MODES[mode], res[freq][mode]))
-                if args.csvfile and (freq, mode) not in [(ch.chfreq, ch.chmode) for ch in channels.values()]:
-                    channels[len(channels)] = Channel(len(channels), '%u %s' % (freq,ADCR25.MODES[mode]), mode, 1, 0, freq)
+                if args.csvfile and (freq, mode) not in [(ch.chfreq, ADCR25.RMODES[ch.chmode]) for ch in channels.values()]:
+                    channels[len(channels)] = Channel.fromtuple(len(channels), '%u %s' % (freq,mode), ADCR25.RMODES[mode], freq)
         if args.csvfile:
             print('Saving scan results to %s'%args.csvfile)
             adcr.write_csv(args.csvfile, ADCR25.sortchannels(channels))
@@ -535,7 +549,7 @@ if __name__ == '__main__':
                 sys.stderr.write('No such channel: %u\n'%args.channo)
                 sys.exit(1)
             chan = channels[args.channo]
-            adcr.set_freq(chan.chfreq, chan.chmode)
+            adcr.set_freq(chan.chfreq, ADCR25.RMODES[chan.chmode])
         else:
             if args.channo>=0 and args.channo<50:
                 chan = adcr.get_mem(args.channo)
@@ -589,8 +603,8 @@ if __name__ == '__main__':
         args = parser.parse_args()
 
         adcr = ADCR25(args.device)
-        adcr.csv2mem(args.csvfile, args.ignore)
         print('Loading file: %s to memory'%args.csvfile)
+        adcr.csv2mem(args.csvfile, args.ignore)
         sys.exit(0)
 
     curcmd = 'csv2ram'
@@ -604,8 +618,8 @@ if __name__ == '__main__':
         args = parser.parse_args()
 
         adcr = ADCR25(args.device)
+        print('Loading file: %s to RAM'%args.csvfile)
         adcr.csv2ram(args.csvfile, args.ignore)
-        print('Loading file: %s to memory'%args.csvfile)
         sys.exit(0)
 
     curcmd = 'list'
@@ -629,9 +643,9 @@ if __name__ == '__main__':
             print(ch)
         sys.exit(0)
 
-    curcmd = 'edit'
+    curcmd = 'replace'
     if args.command == curcmd or ( args.__contains__('cmd') and args.cmd == curcmd ):
-        usage = '%%(prog)s [-d device] [-f csv file] %s <channel number> <freq MHz> mode [name]' % curcmd
+        usage = '%%(prog)s [-d device] [-f csv file] [options] %s <channel number> <freq MHz> <mode> [name]' % curcmd
         parser = argparse.ArgumentParser(usage=usage, formatter_class=MyHelpFormatter)
         parser.add_argument('command', help=curcmd)
         parser.add_argument('channo', help='channel number', type=int)
@@ -640,6 +654,9 @@ if __name__ == '__main__':
         parser.add_argument('name', help='channel name', nargs='?')
         parser.add_argument('-d', '--device', help='Serial port device', default='/dev/ttyUSB0')
         parser.add_argument('-f', '--csv-file', dest='csvfile', help='Use CSV file instead of receiver memory')
+        parser.add_argument('-s', '--scan', type=int, choices=[0,1], help='(Un)Set scan flag')
+        parser.add_argument('-i', '--include', help='Only listen to folowing list of comma-separated NACs')
+        parser.add_argument('-e', '--exclude', help='Skip folowing list of comma-separated NACs')
         args = parser.parse_args()
 
         adcr = ADCR25(args.device)
@@ -647,13 +664,24 @@ if __name__ == '__main__':
             name = args.name
         else:
             name = '%u %s' % (int(args.freq*10**6), args.mode)
+        if args.include and args.exclude:
+            sys.stderr.write('Warning: you can\'t pass --include and --exclude together, only --include will be used')
+
+        extra = [args.scan, int(bool(args.include or args.exclude)), int(bool(args.exclude))] + [0]*8
+        if args.include:
+            for i in range(0, len(args.include.split(','))):
+                extra[3+i] = int(args.include.split(',')[i])
+        elif args.exclude:
+            for i in range(0, len(args.exclude.split(','))):
+                extra[3+i] = int(args.exclude.split(',')[i])
+        chan = Channel.fromtuple(args.channo, name, args.mode, int(args.freq*10**6), *extra)
         if args.csvfile:
             channels = adcr.read_csv(args.csvfile)
-            channels[args.channo] = Channel(args.channo, name, adcr.RMODES[args.mode], 1, 0, int(args.freq*10**6))
+            channels[args.channo] = chan
             adcr.write_csv(args.csvfile, channels.values())
         else:
             if args.channo>=0 and args.channo<50:
-                adcr.set_mem(Channel(args.channo, name, adcr.RMODES[args.mode], 1, 0, int(args.freq*10**6)))
+                adcr.set_mem(chan)
             else:
                 sys.stderr.write('No such channel: %u\n'%args.channo)
                 sys.exit(1)
@@ -695,9 +723,27 @@ if __name__ == '__main__':
         parser.add_argument('-f', '--csv-file', dest='csvfile', help='Use CSV file instead of receiver memory')
         parser.add_argument('-w', '--wait', help='Time (ms) to spend on each frequency and mode [default: %(default)s]', type=int, default=500)
         parser.add_argument('-l', '--listen', help='Time (s) after signal is gone to start scaning again [default: %(default)s]', type=int, default=15)
+        parser.add_argument('-o', '--offline', action='store_true', help='Scan in hardware, even after disconnect', default=False)
+        parser.add_argument('-s', '--stop', action='store_true', help='Stop offline scan', default=False)
         args = parser.parse_args()
 
         adcr = ADCR25(args.device)
+
+        if args.stop:
+            par = adcr.get_params()
+            par.set_autoscan(False)
+            adcr.set_params(par)
+            print('Offline scanning stopped')
+            sys.exit(0)
+        if args.offline:
+            if args.csvfile:
+                sys.stderr.write('Warning: offline scan can only use internal memory, not CSV file\n')
+            par = adcr.get_params()
+            par.set_autoscan(True, args.wait, args.listen)
+            adcr.set_params(par)
+            print('Offline scanning with wait: %ums, listen: %us' % (args.wait, args.listen))
+            sys.exit(0)
+
         ipkt = adcr.buildpacket(0, b'')
         if args.csvfile:
             channels = adcr.read_csv(args.csvfile)
