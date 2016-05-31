@@ -418,7 +418,7 @@ class ADCR25(object):
                             if r and r[0] == 1:
                                 rssi = self.decode_rssi(r[4:])
                                 if rssi['inrx']:
-                                    rf, rm = rssi['freq'], rssi['mode']
+                                    rf, rm = rssi['freq'], rssi['smode']
                                     if rf in freqs.keys() and rm in freqs[rf].keys():
                                         freqs[rf][rm] = max(freqs[rf][rm], rssi['dbm'])
                                     elif rf in freqs.keys():
@@ -429,7 +429,7 @@ class ADCR25(object):
                                 break
                     if printprogress:
                         if freq in freqs.keys():
-                            sys.stderr.write('found ' + ', '.join(['%s: %d dbm'%(self.MODES[i], freqs[freq][i]) for i in freqs[freq].keys()])+'\n')
+                            sys.stderr.write('found ' + ', '.join(['%s: %d dbm'%(i, freqs[freq][i]) for i in freqs[freq].keys()])+'\n')
                         else:
                             sys.stderr.write('\n')
         except KeyboardInterrupt:
@@ -457,10 +457,10 @@ class ADCR25(object):
                     r = self.readpacket()
                     if r and r[0] == 1:
                         rssi = self.decode_rssi(r[4:])
-                        if (rssi['freq'], rssi['mode']) != (chan.chfreq, chan.nmode()):
+                        if (rssi['freq'], rssi['smode']) != (chan.chfreq, chan.chmode):
                             continue
                         if rssi['inrx']:
-                            return (rssi['freq'], rssi['mode'], chan.channo)
+                            return chan.channo
                         if not wait:
                             wait = time.time()
                         elif time.time()-wait>timeout/1000.0:
@@ -556,9 +556,9 @@ if __name__ == '__main__':
             channels = {}
         for freq in res.keys():
             for mode in res[freq].keys():
-                print('%u %s %d dbm' % (freq, ADCR25.MODES[mode], res[freq][mode]))
-                if args.csvfile and (freq, mode) not in [(ch.chfreq, ch.nmode()) for ch in channels.values()]:
-                    channels[len(channels)] = Channel.fromtuple(len(channels), '%u %s' % (freq,mode), ADCR25.MODES[mode], freq)
+                print('%u %s %d dbm' % (freq, mode, res[freq][mode]))
+                if args.csvfile and (freq, mode) not in [(ch.chfreq, ch.chmode) for ch in channels.values()]:
+                    channels[len(channels)] = Channel.fromtuple(len(channels), '%u %s' % (freq,mode), mode, freq)
         if args.csvfile:
             print('Saving scan results to %s'%args.csvfile)
             adcr.write_csv(args.csvfile, ADCR25.sortchannels(channels))
@@ -808,7 +808,7 @@ if __name__ == '__main__':
 
         try:
             while True:
-                (freq, mode, chno) = adcr.chanscan(toscan, args.wait, args.fast, True)
+                chno = adcr.chanscan(toscan, args.wait, args.fast, True)
                 lstime = time.time()
                 while True:
                     t = time.time()
