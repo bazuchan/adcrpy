@@ -558,7 +558,7 @@ if __name__ == '__main__':
             for mode in res[freq].keys():
                 print('%u %s %d dbm' % (freq, ADCR25.MODES[mode], res[freq][mode]))
                 if args.csvfile and (freq, mode) not in [(ch.chfreq, ch.nmode()) for ch in channels.values()]:
-                    channels[len(channels)] = Channel.fromtuple(len(channels), '%u %s' % (freq,mode), ADCR25.RMODES[mode], freq)
+                    channels[len(channels)] = Channel.fromtuple(len(channels), '%u %s' % (freq,mode), ADCR25.MODES[mode], freq)
         if args.csvfile:
             print('Saving scan results to %s'%args.csvfile)
             adcr.write_csv(args.csvfile, ADCR25.sortchannels(channels))
