@@ -86,6 +86,8 @@ class Channel(object):
         return '%u: %3.9gMHz %s "%s" %s %s %s %s' % (self.channo, self.chfreq/1000000.0, self.chmode, self.chname, ['noscan', 'scan'][self.chscan], ['unfiltered', 'filter'][self.chfilt], ['only', 'exclude'][self.chfinv], ' '.join(['%u'%i for i in self.filter_ids]))
 
 class Params(object):
+    ATTN = {0:0, 1:-6, 2:-12, 3:-18, 4:-24, 5:-30, 6:-39}
+    RATTN = dict(zip(ATTN.values(), ATTN.keys()))
     def __init__(self, bparams):
         if len(bparams) == 172:
             self.params = bparams
@@ -95,7 +97,9 @@ class Params(object):
     def decode(self):
         r = {}
         r['vol'] = self.params[0]
+        r['dbm_offset'] = self.params[1]
         r['mode'] = ADCR25.MODES[self.params[2]]
+        r['attenuator'] = self.ATTN[self.params[3]]
         r['equalizer'] = list(self.params[4:12])
         r['freq'] = self.get(12, 'I')[0]
         r['freq2'] = self.get(16, 'I')[0]
@@ -115,6 +119,7 @@ class Params(object):
         for b in range(0, 3):
             grp_offset = 44 + (b) * 32
             r['filter_group_banks_ids'].append(self.get(grp_offset, 'IIIIIIII'))
+        r['noise_floor'] = self.get(26, 'b')[0]
         return r
 
     def tobytes(self):
@@ -129,7 +134,16 @@ class Params(object):
         return struct.unpack(stype, self.params[pos:pos+slen])
 
     def set_volume(self, vol):
-        self.set(0, 'B', vol)
+        self.set(0, 'B', min(vol, 15))
+
+    def set_dbm_offset(self, dbmo):
+        self.set(1, 'B', dbmo)
+
+    def set_attn(self, att):
+        self.set(3, 'B', self.RATTN[att])
+
+    def set_noise_floor(self, nf):
+        self.set(26, 'b', nf)
 
     def set_autoscan(self, autoscan, wait=500, listen=15):
         if autoscan:
@@ -516,7 +530,7 @@ class MyHelpFormatter(argparse.HelpFormatter):
         super(MyHelpFormatter, self).__init__(*kc, **kv)
 
 if __name__ == '__main__':
-    commands = ['info', 'filter', 'recv', 'tune', 'scan', 'list', 'chan', 'scanmem', 'replace', 'mem2csv', 'csv2mem', 'csv2ram']
+    commands = ['info', 'filter', 'recv', 'tune', 'scan', 'list', 'chan', 'scanmem', 'replace', 'mem2csv', 'csv2mem', 'csv2ram', 'set']
 
     usage = '%(prog)s [-d device] <command> [command options] ...'
     p = argparse.ArgumentParser(usage=usage, formatter_class=MyHelpFormatter, add_help=False)
@@ -620,9 +634,10 @@ if __name__ == '__main__':
         par = adcr.get_params().decode()
         print('Band: %s, Serial Number: %s, Firmware version: %s' % (band, sn, ver))
         print('Current frequency: %3.9g Mhz, Mode: %s, Volume: %u' % (par['freq']/1000000.0, par['mode'], par['vol']))
+        print('Noise floor: %ddbm, Signal level offset: %u, Attenuator level: %ddb' % (par['noise_floor'], par['dbm_offset'], par['attenuator']))
         print('Autoscan: %s, Wait: %ums, Hold: %us' % (par['autoscan'], par['autoscan_wait'], par['autoscan_hold']))
         print('NAC filtering: %s, Invert: %s, NACs: %s' % (par['filter_nac_enable'], par['filter_nac_invert'], ' '.join(['%u'%i for i in par['filter_nac_ids']])))
-        print('Group filtering: %s, Bank: %u, Invert: %s, NACs: %s' % (par['filter_group_enable'], par['filter_group_bank'], par['filter_group_invert'], ' '.join(['%u'%i for i in par['filter_group_ids']])))
+        print('Group filtering: %s, Bank: %u, Invert: %s, groups: %s' % (par['filter_group_enable'], par['filter_group_bank'], par['filter_group_invert'], ' '.join(['%u'%i for i in par['filter_group_ids']])))
         sys.exit(0)
 
     curcmd = 'mem2csv'
@@ -859,7 +874,7 @@ if __name__ == '__main__':
             filter_ids = current['filter_nac_ids']
         par.set_filters_nac(chfilt, chfinv, filter_ids)
 
-        if args.groupfilterbank:
+        if args.groupfilterbank is not None:
             bank = args.groupfilterbank
         else:
             bank = current['filter_group_bank']
@@ -880,5 +895,38 @@ if __name__ == '__main__':
 
         adcr.set_params(par)
         print('Filter settings updated, use %s info to see results' % (sys.argv[0]))
+        sys.exit(0)
+
+    curcmd = 'set'
+    if args.command == curcmd or ( args.__contains__('cmd') and args.cmd == curcmd ):
+        usage = '%%(prog)s [-d device] %s [options]' % curcmd
+        parser = argparse.ArgumentParser(usage=usage, formatter_class=MyHelpFormatter)
+        parser.add_argument('command', help=curcmd)
+        parser.add_argument('-d', '--device', help='Serial port device', default='/dev/ttyUSB0')
+        parser.add_argument('-v', '--volume', type=int, choices=list(range(0, 16)), help='Sound volume 0-15')
+        parser.add_argument('-n', '--noise-floor', type=int, dest='noisefloor', help='Noise floor to detect signal')
+        attns = list(Params.RATTN)
+        attns.sort(reverse=True)
+        parser.add_argument('-a', '--attenuator', type=int, choices=attns, help='Attenuator level, db')
+        parser.add_argument('-o', '--dbm-offset', type=int, dest='dbmoffset', help='Offset to reported signal level')
+        args = parser.parse_args()
+
+        adcr = ADCR25(args.device)
+        par = adcr.get_params()
+
+        if args.volume is not None:
+            par.set_volume(args.volume)
+        if args.noisefloor is not None:
+            if args.noisefloor<-127 or args.noisefloor>0:
+                sys.stderr.write('Error: noise floor must be between -127 and 0\n')
+                sys.exit(1)
+            par.set_noise_floor(args.noisefloor)
+        if args.attenuator is not None:
+            par.set_attn(args.attenuator)
+        if args.dbmoffset is not None:
+            par.set_dbm_offset(args.dbmoffset)
+
+        adcr.set_params(par)
+        print('Settings updated, use %s info to see results' % (sys.argv[0]))
         sys.exit(0)
 
