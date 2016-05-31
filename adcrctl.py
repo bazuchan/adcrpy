@@ -95,7 +95,7 @@ class Params(object):
     def decode(self):
         r = {}
         r['vol'] = self.params[0]
-        r['mode'] = self.params[2]
+        r['mode'] = ADCR25.MODES[self.params[2]]
         r['equalizer'] = list(self.params[4:12])
         r['freq'] = self.get(12, 'I')[0]
         r['freq2'] = self.get(16, 'I')[0]
@@ -278,7 +278,7 @@ class ADCR25(object):
         if x[0]==1:
             if x[2] == 0 and x[3] > 20:
                 rssi = ADCR25.decode_rssi(x[4:])
-                return 'RSSI ' + ', '.join(['%s: %s' % (i, rssi[i]) for i in ['inrx', 'freq', 'smode', 'dbm', 'uv', 'pl', 'encrypted', 'isgroup', 'src', 'dst']])
+                return 'RSSI ' + ', '.join(['%s: %s' % (i, rssi[i]) for i in ['inrx', 'freq', 'mode', 'dbm', 'uv', 'pl', 'encrypted', 'isgroup', 'src', 'dst']])
         return 'Code %u, Data %s' % (x[0], repr(x[4:-2]))
 
     @staticmethod
@@ -345,16 +345,16 @@ class ADCR25(object):
     def decode_rssi(pkt):
         r = {}
         r['inrx'] = pkt[0] == 2
-        r['mode'] = pkt[7]
-        if r['mode'] == 255:
-            r['mode'] = 1
-        r['encrypted'] = ( r['mode'] == 0 and pkt[1] != 128 ) or ( r['mode'] in [1,2,3] and pkt[2]&8 ) or ( r['mode'] in [5,6] and pkt[1] !=0 )
-        r['isgroup'] = ( r['mode'] == 0 and pkt[6] != 1 ) or ( r['mode'] in [1,2,3,4] and not pkt[2]&16 ) or ( r['mode'] in [5,6] and pkt[6]>>5 in [0,1] )
+        r['nmode'] = pkt[7]
+        if r['nmode'] == 255:
+            r['nmode'] = 1
+        r['encrypted'] = ( r['nmode'] == 0 and pkt[1] != 128 ) or ( r['nmode'] in [1,2,3] and pkt[2]&8 ) or ( r['nmode'] in [5,6] and pkt[1] !=0 )
+        r['isgroup'] = ( r['nmode'] == 0 and pkt[6] != 1 ) or ( r['nmode'] in [1,2,3,4] and not pkt[2]&16 ) or ( r['nmode'] in [5,6] and pkt[6]>>5 in [0,1] )
         r['dbm'] = struct.unpack('b', pkt[3:4])[0]
-        r['smode'] = ADCR25.MODES[r['mode']]
+        r['mode'] = ADCR25.MODES[r['nmode']]
         r['freq'] = struct.unpack('I', pkt[20:24])[0]
         r['nac'] = struct.unpack('H', pkt[8:10])[0]
-        if r['mode'] == 4:
+        if r['nmode'] == 4:
             r['src'], r['dst'] = fromcstr(pkt[24:34]), fromcstr(pkt[34:44])
         else:
             r['src'], r['dst'] = ['%u'%i for i in struct.unpack('II', pkt[12:20])]
@@ -418,7 +418,7 @@ class ADCR25(object):
                             if r and r[0] == 1:
                                 rssi = self.decode_rssi(r[4:])
                                 if rssi['inrx']:
-                                    rf, rm = rssi['freq'], rssi['smode']
+                                    rf, rm = rssi['freq'], rssi['mode']
                                     if rf in freqs.keys() and rm in freqs[rf].keys():
                                         freqs[rf][rm] = max(freqs[rf][rm], rssi['dbm'])
                                     elif rf in freqs.keys():
@@ -457,7 +457,7 @@ class ADCR25(object):
                     r = self.readpacket()
                     if r and r[0] == 1:
                         rssi = self.decode_rssi(r[4:])
-                        if (rssi['freq'], rssi['smode']) != (chan.chfreq, chan.chmode):
+                        if (rssi['freq'], rssi['mode']) != (chan.chfreq, chan.chmode):
                             continue
                         if rssi['inrx']:
                             return chan.channo
@@ -619,7 +619,7 @@ if __name__ == '__main__':
         (sn, ver, band) = adcr.get_info()
         par = adcr.get_params().decode()
         print('Band: %s, Serial Number: %s, Firmware version: %s' % (band, sn, ver))
-        print('Current frequency: %3.9g Mhz, Mode: %s, Volume: %u' % (par['freq']/1000000.0, adcr.MODES[par['mode']], par['vol']))
+        print('Current frequency: %3.9g Mhz, Mode: %s, Volume: %u' % (par['freq']/1000000.0, par['mode'], par['vol']))
         print('Autoscan: %s, Wait: %ums, Hold: %us' % (par['autoscan'], par['autoscan_wait'], par['autoscan_hold']))
         print('NAC filtering: %s, Invert: %s, NACs: %s' % (par['filter_nac_enable'], par['filter_nac_invert'], ' '.join(['%u'%i for i in par['filter_nac_ids']])))
         print('Group filtering: %s, Bank: %u, Invert: %s, NACs: %s' % (par['filter_group_enable'], par['filter_group_bank'], par['filter_group_invert'], ' '.join(['%u'%i for i in par['filter_group_ids']])))
@@ -753,7 +753,7 @@ if __name__ == '__main__':
                 if not r or r[0] != 1:
                     continue
                 rssi = adcr.decode_rssi(r[4:])
-                print('\r%3.9gMHz %s %ddbm' % (rssi['freq']/1000000.0, rssi['smode'], rssi['dbm']), end='')
+                print('\r%3.9gMHz %s %ddbm' % (rssi['freq']/1000000.0, rssi['mode'], rssi['dbm']), end='')
                 if rssi['inrx']:
                     print('  %s -> %s, nac: %u' % (rssi['src'], rssi['dst'], rssi['nac']), end='')
                 print("\033[K", end='')
@@ -820,7 +820,7 @@ if __name__ == '__main__':
                     if not r or r[0] != 1:
                         continue
                     rssi = adcr.decode_rssi(r[4:])
-                    print('\r%u: %3.9gMHz %s %ddbm' % (chno, rssi['freq']/1000000.0, rssi['smode'], rssi['dbm']), end='')
+                    print('\r%u: %3.9gMHz %s %ddbm' % (chno, rssi['freq']/1000000.0, rssi['mode'], rssi['dbm']), end='')
                     if rssi['inrx']:
                         lstime = time.time()
                         print('  %s -> %s, nac: %u' % (rssi['src'], rssi['dst'], rssi['nac']), end='')
