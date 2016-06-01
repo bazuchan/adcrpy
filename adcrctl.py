@@ -9,6 +9,7 @@ import time
 import csv
 import argparse
 import os.path
+import p25trunk
 
 class ADCR_CRC(object):
     TABLE = [ 0x0000, 0x1081, 0x2102, 0x3183, 0x4204, 0x5285, 0x6306, 0x7387, 0x8408, 0x9489, 0xa50a, 0xb58b, 0xc60c, 0xd68d, 0xe70e, 0xf78f]
@@ -185,7 +186,7 @@ class ADCR25(object):
         self.debug = debug
         self.last = 0
         self.rssi_timeout = 1
-        self.serial = serial.Serial(self.device, 115200)
+        self.serial = serial.Serial(self.device, 115200, timeout=5)
 
     @staticmethod
     def stuff(x):
@@ -211,14 +212,20 @@ class ADCR25(object):
 
     def readpacket(self):
         # attempt to synchronize
-        if self.serial.read(1) != b'\xc0':
-            while self.serial.read(1) != b'\xc0':
-                pass
-            return ''
+        while True:
+            byte = self.serial.read(1)
+            if len(byte) == 0:
+                return None
+            if byte == b'\xc0':
+                break
         # read packet
         pkt = b'\xc0'
         while True:
             pkt += self.serial.read(1)
+            # missynched packet?
+            if pkt[1] == 0xc0:
+                pkt = pkt[:1]
+                continue
             if pkt[-1] == 0xc0:
                 break
             # optimize
@@ -229,7 +236,7 @@ class ADCR25(object):
         if self.debug:
             self.printpacket(rpkt)
         if self.checkpacket(rpkt) != 0:
-            return ''
+            return b''
         return rpkt
 
     E_PKT_INVALID_HEADER = -1
@@ -238,11 +245,11 @@ class ADCR25(object):
     @staticmethod
     def checkpacket(x):
         if (~(x[0]+x[2]+x[3]))&0xFF != x[1]:
-            return E_PKT_INVALID_HEADER
+            return ADCR25.E_PKT_INVALID_HEADER
         if struct.unpack('>BBH', x[:4])[2] != len(x)-6:
-            return E_PKT_INVALID_LEN
+            return ADCR25.E_PKT_INVALID_LEN
         if ADCR_CRC().update(x[:-2]).digest() != struct.unpack('>H', x[-2:])[0]:
-            return E_PKT_INVALID_CRC
+            return ADCR25.E_PKT_INVALID_CRC
         return 0
 
     @staticmethod
@@ -315,6 +322,8 @@ class ADCR25(object):
         self.sendpacket(pkt)
         while True:
             r = self.readpacket()
+            if r is None:
+                return None
             if r and r[0] == code:
                 return r
 
@@ -759,19 +768,23 @@ if __name__ == '__main__':
         args = parser.parse_args()
 
         adcr = ADCR25(args.device)
+        t = p25trunk.P25Trunk()
         ipkt = adcr.buildpacket(0, b'')
         try:
             while True:
                 if time.time()-adcr.last>adcr.rssi_timeout:
                     adcr.sendpacket(ipkt)
                 r = adcr.readpacket()
-                if not r or r[0] != 1:
+                if not r:
                     continue
-                rssi = adcr.decode_rssi(r[4:])
-                print('\r%3.9gMHz %s %ddbm' % (rssi['freq']/1000000.0, rssi['mode'], rssi['dbm']), end='')
-                if rssi['inrx']:
-                    print('  %s -> %s, nac: %u' % (rssi['src'], rssi['dst'], rssi['nac']), end='')
-                print("\033[K", end='')
+                if r[0] == 1:
+                    rssi = adcr.decode_rssi(r[4:])
+                    print('\r%3.9gMHz %s %ddbm' % (rssi['freq']/1000000.0, rssi['mode'], rssi['dbm']), end='')
+                    if rssi['inrx']:
+                        print('  %s -> %s, nac: %u' % (rssi['src'], rssi['dst'], rssi['nac']), end='')
+                    print("\033[K", end='')
+                elif r[0] in [13,14,16]:
+                    t.decodeContolChannel(r[0], r[4:-2])
         except KeyboardInterrupt:
             print()
         sys.exit(0)
