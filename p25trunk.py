@@ -4,6 +4,8 @@ import struct
 import time
 
 class P25Trunk(object):
+    MAX_HOLD_TIME = 4
+
     def __init__(self):
         self.clear()
 
@@ -179,43 +181,43 @@ class P25Trunk(object):
     def clear(self):
         self.system = (0,0)
         self.tt_ids = {}
-        self.ccs = {}
+        self.chans = {}
         self.peers = {}
-        self.tt_chan = {}
         self.infosystem = ''
         self.infocontrol = ''
         self.infosite = ''
+        self.logbuf = {}
 
     def printstatus(self):
+        return
         print()
         print(self.infosystem, self.infocontrol, self.infosite)
-        print(self.ccs)
+        print(self.chans)
         print(self.peers)
         print()
 
     def tt_iden_up(self, band, bw, txo, cs, bf):
         self.tt_ids[band] = {'bandwidth':bw, 'txo':txo, 'cs':cs, 'basefreq':bf}
-        if bw in [4,5]:
-            bww = {4:6.25, 5:12.5}[bw]
-        else:
-            bww = bw/1000.0
-        print('\n', 'system id: %u, bf: %s,%s, cs: %f, bw: %f, txo: %f' % (band, repr(bf)[:3], repr(bf)[3:], cs/1000.0, bww, txo/1000000.0), '\n')
+        #if bw in [4,5]:
+        #    bww = {4:6.25, 5:12.5}[bw]
+        #else:
+        #    bww = bw/1000.0
 
     def tt_add_cc(self, chan, isprimary):
         band = (chan >> 12) & 0xF
         channo = chan & 0xFFF
         if band not in self.tt_ids.keys() or not self.tt_ids[band]['basefreq']:
             return
-        if (band, channo) in self.ccs.keys():
-            self.ccs[(band, channo)]['seen'] = time.time()
+        chid = '%u-%u' % (band, channo)
+        if chid in self.chans.keys():
+            self.chans[chid]['seen'] = time.time()
             return
-        self.tt_add_chan_id(chan)
         freq = self.tt_ids[band]['basefreq'] + channo * self.tt_ids[band]['cs']
-        self.ccs[(band, channo)] = {'freq':freq, 'primary':isprimary, 'seen':time.time()}
+        self.chans[chid] = {'freq':freq, 'type':['secondary', 'primary'][int(isprimary)], 'seen':time.time(), 'dst':0, 't':'', 'src':0, 'hits':0, 'hold':0}
         self.printstatus()
 
-    def tt_add_chan_id(self, chan):
-        self.tt_chan[chan] = 0
+    def tt_add_chan_id(self, chanid):
+        self.chans[chanid]['hold'] = 0
 
     def tt_sccb_exp(self, rfss, site, chanT, chanR, ss_class):
         self.tt_add_cc(chanT, False)
@@ -258,11 +260,55 @@ class P25Trunk(object):
         self.peers[(rfss, site)] = {'id':peerid, 'rfss':peerrfss, 'chan':peerchan, 'freq':peerfreq, 'seen':time.time()}
         self.printstatus()
 
-    def tt_grp_vc_grant_updt(self, *k):
-        print("tt_grp_vc_grant_updt:", k, "\n")
+    def tt_grp_vc_grant_updt(self, chanT, chanR, group):
+        band = (chanT >> 12) & 0xF
+        channo = chanT & 0xFFF
+        if band not in self.tt_ids.keys() or not self.tt_ids[band]['basefreq']:
+            return
+        chid = '%u-%u' % (band, channo)
+        if chid in self.chans.keys():
+            self.chans[chid]['hold'] = self.MAX_HOLD_TIME
 
-    def tt_grp_vc_grant(self, *k):
-        print("tt_grp_vc_grant:", k, "\n")
+    def tt_grp_vc_grant(self, srv, chanT, chanR, group, src):
+        band = (chanT >> 12) & 0xF
+        channo = chanT & 0xFFF
+        if band not in self.tt_ids.keys() or not self.tt_ids[band]['basefreq']:
+            return
+        self.tt_grp_vc_evt(srv, group, src)
+        chid = '%u-%u' % (band, channo)
+        if chid in self.chans.keys():
+            if (group, 'G', src) != (self.chans[chid]['dst'], self.chans[chid]['t'], self.chans[chid]['src']):
+                self.chans[chid]['hits'] += 1
+            else:
+                self.chans[chid]['dst'] = group
+                self.chans[chid]['t'] = 'G'
+                self.chans[chid]['src'] = src
+                self.chans[chid]['seen'] = time.time()
+                self.chans[chid]['hold'] = self.MAX_HOLD_TIME
+            return
+        freq = self.tt_ids[band]['basefreq'] + channo * self.tt_ids[band]['cs']
+        self.chans[chid] = {'freq':freq, 'type':'traffic', 'seen':time.time(), 'dst':group, 't':'G', 'src':src, 'hits':1, 'hold':self.MAX_HOLD_TIME}
+        self.printstatus()
+
+    def log_call(self, src, dst, action, result, service):
+        #if (src, dst, action, result, service) in self.logbuf.keys() and self.logbuf[(src, dst, action, result, service)]>
+        print('\r\033[K', src, dst, action, result, service)
+
+    def tt_grp_vc_evt(self, srv, grp, src):
+        self.log_call(src, grp, 'Voice', 'Grant', srv)
+
+    def tt_loc_reg_rsp(self, res, grp_adr, rfss, site, tgt_adr):
+        self.log_call(grp_adr, tgt_adr, 'Joins', ['Accept', 'Fail', 'Deny', 'Refused'][res], 0)
+
+    def tt_reg_rsp(self, res, system, src_id, src_adr):
+        self.log_call(src_adr, src_id, 'Login', ['Accept', 'Fail', 'Deny', 'Refused'][res], 0)
+
+    def tt_dereg_rsp(self, wacn, system, src_id):
+        self.log_call(src_id, src_id, 'Logout', 'Accept', 0)
+
+    def tt_grp_aff(self, lg, gav, ann_grp_adr, grp_adr, tgt_adr):
+        self.log_call(grp_adr, tgt_adr, 'Joins', ['Accept', 'Fail', 'Deny', 'Refused'][gav], 0)
+
     def tt_uu_vc_grant(self, *k):
         print("tt_uu_vc_grant:", k, "\n")
     def tt_uu_vc_grant_updt(self, *k):
@@ -271,11 +317,3 @@ class P25Trunk(object):
         print("tt_grp_dc_grant:", k, "\n")
     def tt_page_req(self, *k):
         print("tt_page_req:", k, "\n")
-    def tt_grp_aff(self, *k):
-        print("tt_grp_aff:", k, "\n")
-    def tt_reg_rsp(self, *k):
-        print("tt_reg_rsp:", k, "\n")
-    def tt_dereg_rsp(self, *k):
-        print("tt_dereg_rsp:", k, "\n")
-    def tt_loc_reg_rsp(self, *k):
-        print("tt_loc_reg_rsp:", k, "\n")
