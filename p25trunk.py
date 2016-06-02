@@ -1,10 +1,11 @@
 #!/usr/bin/python
 
 import struct
+import time
 
 class P25Trunk(object):
     def __init__(self):
-        pass
+        self.clear()
 
     def decodeContolChannel(self, code, data):
         if code == 13:
@@ -175,12 +176,93 @@ class P25Trunk(object):
             (src, dst, vcfreq) = struct.unpack('III', data[8:20])
         print("tt event:", ccfreq, iscontrol, dbm, "\n")
 
-    def tt_grp_vc_grant(self, *k):
-        print("tt_grp_vc_grant:", k, "\n")
+    def clear(self):
+        self.system = (0,0)
+        self.tt_ids = {}
+        self.ccs = {}
+        self.peers = {}
+        self.tt_chan = {}
+        self.infosystem = ''
+        self.infocontrol = ''
+        self.infosite = ''
+
+    def printstatus(self):
+        print()
+        print(self.infosystem, self.infocontrol, self.infosite)
+        print(self.ccs)
+        print(self.peers)
+        print()
+
+    def tt_iden_up(self, band, bw, txo, cs, bf):
+        self.tt_ids[band] = {'bandwidth':bw, 'txo':txo, 'cs':cs, 'basefreq':bf}
+        if bw in [4,5]:
+            bww = {4:6.25, 5:12.5}[bw]
+        else:
+            bww = bw/1000.0
+        print('\n', 'system id: %u, bf: %s,%s, cs: %f, bw: %f, txo: %f' % (band, repr(bf)[:3], repr(bf)[3:], cs/1000.0, bww, txo/1000000.0), '\n')
+
+    def tt_add_cc(self, chan, isprimary):
+        band = (chan >> 12) & 0xF
+        channo = chan & 0xFFF
+        if band not in self.tt_ids.keys() or not self.tt_ids[band]['basefreq']:
+            return
+        if (band, channo) in self.ccs.keys():
+            self.ccs[(band, channo)]['seen'] = time.time()
+            return
+        self.tt_add_chan_id(chan)
+        freq = self.tt_ids[band]['basefreq'] + channo * self.tt_ids[band]['cs']
+        self.ccs[(band, channo)] = {'freq':freq, 'primary':isprimary, 'seen':time.time()}
+        self.printstatus()
+
+    def tt_add_chan_id(self, chan):
+        self.tt_chan[chan] = 0
+
+    def tt_sccb_exp(self, rfss, site, chanT, chanR, ss_class):
+        self.tt_add_cc(chanT, False)
+
+    def tt_sccb(self, rfss, site, chan1, ss_class1, chan2, ss_class2):
+        self.tt_add_cc(chan1, False)
+        self.tt_add_cc(chan2, False)
+
+    def tt_net_sts(self, lra, wacn, system, chanT, chanR, ss_class):
+        if not wacn:
+            return
+        if self.system != (wacn, system):
+            self.clear()
+            self.system = (wacn, system)
+            self.infosystem = '%u-%u' % (wacn, system)
+        self.tt_add_cc(chanT, True)
+
+    def tt_rfss_sts(self, lra, flags, system, rfss, site, chanT, chanR, ss_class):
+        band = (chanT >> 12) & 0xF
+        channo = chanT & 0xFFF
+        if band not in self.tt_ids.keys() or not self.tt_ids[band]['basefreq']:
+            return
+        freq = self.tt_ids[band]['basefreq'] + channo * self.tt_ids[band]['cs']
+        self.infocontrol = '%u-%u (%u)' % (band, channo, freq)
+        self.infosite = '%u-%u' % (rfss, site)
+        self.printstatus()
+
+    def tt_adj_sts(self, lra, flags, system, rfss, site, chanT, chanR, ss_class):
+        band = (chanT >> 12) & 0xF
+        channo = chanT & 0xFFF
+        if band not in self.tt_ids.keys() or not self.tt_ids[band]['basefreq']:
+            return
+        if (rfss, site) in self.peers.keys():
+            self.peers[(rfss, site)]['seen'] = time.time()
+            return
+        peerid = '%u-%u' % (self.system[0], system)
+        peerrfss = '%u-%u' % (rfss, site)
+        peerchan = '%u-%u' % (band, channo)
+        peerfreq = self.tt_ids[band]['basefreq'] + channo * self.tt_ids[band]['cs']
+        self.peers[(rfss, site)] = {'id':peerid, 'rfss':peerrfss, 'chan':peerchan, 'freq':peerfreq, 'seen':time.time()}
+        self.printstatus()
+
     def tt_grp_vc_grant_updt(self, *k):
         print("tt_grp_vc_grant_updt:", k, "\n")
-    def tt_iden_up(self, *k):
-        print("tt_iden_up:", k, "\n")
+
+    def tt_grp_vc_grant(self, *k):
+        print("tt_grp_vc_grant:", k, "\n")
     def tt_uu_vc_grant(self, *k):
         print("tt_uu_vc_grant:", k, "\n")
     def tt_uu_vc_grant_updt(self, *k):
@@ -191,19 +273,9 @@ class P25Trunk(object):
         print("tt_page_req:", k, "\n")
     def tt_grp_aff(self, *k):
         print("tt_grp_aff:", k, "\n")
-    def tt_sccb_exp(self, *k):
-        print("tt_sccb_exp:", k, "\n")
     def tt_reg_rsp(self, *k):
         print("tt_reg_rsp:", k, "\n")
     def tt_dereg_rsp(self, *k):
         print("tt_dereg_rsp:", k, "\n")
     def tt_loc_reg_rsp(self, *k):
         print("tt_loc_reg_rsp:", k, "\n")
-    def tt_sccb(self, *k):
-        print("tt_sccb:", k, "\n")
-    def tt_rfss_sts(self, *k):
-        print("tt_rfss_sts:", k, "\n")
-    def tt_net_sts(self, *k):
-        print("tt_net_sts:", k, "\n")
-    def tt_adj_sts(self, *k):
-        print("tt_adj_sts:", k, "\n")
