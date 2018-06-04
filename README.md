@@ -1,0 +1,3 @@
+This is control interface for ADCR25 receiver written in python.
+Based on decompilation of windows program.
+P25 trunking is not finished and probably will not...
